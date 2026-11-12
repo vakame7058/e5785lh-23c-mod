@@ -1,0 +1,13 @@
+# Сборка меню: копии библиотек роутера и заголовки
+oled-menu/build/sysroot/
+oled-menu/build/crt/
+oled-menu/install/files/hijacks/oled_cfg/
+oled-menu/test/out/
+game/test/out/
+# Рабочие файлы инструкций: разделы прошивки, копии NV с данными экземпляра
+work/
+parts/
+nvbackup/
+nvfix/
+nvundo/
+__pycache__/

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response>
+<stock><pci>100</pci><cell_id>12345678</cell_id><rsrp>-97dBm</rsrp><rsrq>-11dB</rsrq><rssi>-69dBm</rssi><sinr>8dB</sinr><band>3</band><earfcn>DL:1300 UL:19300</earfcn><dlbandwidth>20MHz</dlbandwidth><ulbandwidth>20MHz</ulbandwidth><txpower>PPusch:11dBm</txpower><plmn>00101</plmn><mode>7</mode></stock>
+<hcsq_mode>LTE</hcsq_mode><rsrp_dbm>-97</rsrp_dbm><sinr_db>8</sinr_db><rsrq_db>-11</rsrq_db><rssi_dbm>-69</rssi_dbm>
+<band>3</band><earfcn_dl>1300</earfcn_dl><earfcn_ul>19300</earfcn_ul><bw_dl_mhz>20</bw_dl_mhz><bw_ul_mhz>20</bw_ul_mhz>
+<output>^HCSQ: "LTE",44,40,111,28
+
+OK</output>
+</response>

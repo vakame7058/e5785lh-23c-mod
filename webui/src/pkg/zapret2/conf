@@ -1,0 +1,36 @@
+# Настройки zapret2 (nfqws2). Формат: КЛЮЧ="значение", как в sh. После правки: svc.sh stop; svc.sh start
+
+# Внешний интерфейс (мобильная сеть)
+IFACE_WAN="eth_x"
+
+# Номер очереди NFQUEUE
+QNUM="200"
+
+# Бит mark на пакетах, которые отправляет сам nfqws2 (защита от петли)
+FWMARK="0x40000000"
+
+# Порты назначения, пакеты которых идут в nfqws2
+PORTS_TCP="80,443"
+PORTS_UDP="443"
+
+# Сколько первых пакетов каждого соединения отдавать в nfqws2: исходящих и входящих.
+# Остальные пакеты идут мимо nfqws2. Больше — выше нагрузка на процессор.
+TCP_PKT_OUT="9"
+TCP_PKT_IN="3"
+UDP_PKT_OUT="5"
+UDP_PKT_IN="3"
+
+# Перехват для IPv6 (1 — да, 0 — нет)
+IPV6="1"
+
+# Стратегия: параметры nfqws2 без служебных (--qnum, --fwmark, --lua-init добавляет svc.sh).
+# Профили разделяет --new. По умолчанию — как в config.default zapret2.
+NFQWS2_OPT="--filter-tcp=80 --filter-l7=http --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5 --lua-desync=multisplit:pos=method+2 --new --filter-tcp=443 --filter-l7=tls --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tcp_seq=-10000 --lua-desync=multidisorder:pos=1,midsld --new --filter-udp=443 --filter-l7=quic --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=6"
+
+# Файл со списком доменов. Пусто — обход для всех сайтов.
+# Если файл задан, к каждому профилю добавляется --hostlist=ФАЙЛ.
+HOSTLIST=""
+
+# Пользователь, от которого nfqws2 работает после запуска (uid:gid,gid).
+# Группы 3003 (inet) и 3004 (net_raw): ядро роутера дает сетевые сокеты только root и этим группам.
+RUN_UID="2147483647:3003,3004"

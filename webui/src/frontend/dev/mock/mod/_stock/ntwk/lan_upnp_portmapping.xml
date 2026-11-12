@@ -1,0 +1,1 @@
+<?xml version="1.0" encoding="UTF-8"?><response><upnpportmappings><upnpportmapping><remotehost></remotehost><externalport>51413</externalport><protocol>TCP</protocol><internalport>51413</internalport><internalclient>192.168.1.101</internalclient><portmappingdesc>Transmission</portmappingdesc></upnpportmapping></upnpportmappings></response>

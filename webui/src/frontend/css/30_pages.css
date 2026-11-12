@@ -1,0 +1,71 @@
+/* Страницы. Только раскладка внутри карточек; цвета и отступы — токены из 00_base.css. */
+
+/* вход */
+.login-wrap { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: var(--s5) var(--s4); gap: var(--s4); }
+.login-card { width: min(100%, 380px); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: var(--s5); display: flex; flex-direction: column; gap: var(--s5); }
+.login-top { display: flex; align-items: center; gap: var(--s3); }
+.login-logo { width: 40px; height: 40px; border-radius: var(--radius-s); border: 1px solid var(--border); color: var(--text); display: flex; align-items: center; justify-content: center; flex: none; }
+.login-t { flex: 1; min-width: 0; }
+.login-t h1 { font-size: 18px; }
+.login-t .muted { font-size: 13px; }
+.login-form { gap: var(--s4); }
+.login-btn { width: 100%; height: 40px; }
+.login-form input { height: 40px !important; }
+.login-foot { font-size: 13px; text-align: center; }
+
+/* сводка */
+.hero { display: flex; align-items: center; gap: var(--s3); }
+.hero-bars .bars { height: 24px; gap: 3px; }
+.hero-bars .bars i { width: 4px; border-radius: 1px; }
+.hero-t { flex: 1; min-width: 0; }
+.hero-op { font-size: 18px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; letter-spacing: -0.01em; }
+.hero-sub { color: var(--text-2); font-size: 13px; min-height: 1em; }
+.stats2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s4); }
+.stat-link { color: inherit; border-radius: var(--radius-s); }
+.stat-link:hover { text-decoration: none; }
+.stat-link:hover .stat-v { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.res-rows { display: flex; flex-direction: column; gap: var(--s3); }
+
+/* сигнал */
+.sig-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); flex-wrap: wrap; }
+.sig-actions { justify-content: flex-end; }
+.sig-actions .btn.on { color: var(--accent); }
+.sig-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: var(--gap); }
+.sig-tile { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: var(--card-pad); display: flex; flex-direction: column; gap: var(--s2); min-width: 0; overflow: hidden; }
+.sig-h { display: flex; justify-content: space-between; align-items: center; gap: var(--s2); min-height: 22px; }
+.sig-l { font-weight: 500; color: var(--text-2); font-family: var(--mono); font-size: 13px; }
+.sig-q { font-size: 12px; font-weight: 500; }
+.sig-q.ok { color: var(--ok); } .sig-q.warn { color: var(--warn); } .sig-q.err { color: var(--err); }
+.sig-v { font-size: 28px; font-weight: 600; line-height: 1.15; white-space: nowrap; overflow: hidden; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.sig-u { font-size: .5em; font-weight: 500; color: var(--text-3); margin-left: .3em; letter-spacing: 0; }
+.sig-sub { color: var(--text-3); font-size: 12px; }
+.sig-tile .meter-h { display: none; }
+.aiming .sig-tiles { grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); }
+.aiming .sig-v { font-size: clamp(36px, 3.6vw, 60px); }
+.aiming .sig-tile .meter-t { height: 6px; border-radius: 3px; }
+.aiming .sig-l { font-size: 15px; }
+@media (max-width: 599px) {
+  .sig-tiles, .aiming .sig-tiles { grid-template-columns: 1fr 1fr; }
+  .sig-v { font-size: 22px; }
+  .aiming .sig-v { font-size: 30px; }
+  .sig-head .btn span { display: none; }
+  .sig-head .btn { padding: 0 var(--s3); }
+}
+.lock-st { margin: 0; }
+.form-inline { gap: var(--s3); }
+
+/* клиенты */
+.host { display: flex; flex-direction: column; min-width: 0; }
+.host small { font-size: 12px; font-family: var(--mono); color: var(--text-3); }
+@media (max-width: 599px) {
+  .tbl td .host { align-items: flex-end; }
+}
+
+/* тест скорости */
+.st-result { font-size: 32px; font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; line-height: 1.2; }
+.st-result small { font-size: 14px; font-weight: 500; color: var(--text-2); margin-left: var(--s2); letter-spacing: 0; }
+
+/* списки ссылок (редкие настройки, стоковые страницы) */
+.link-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: var(--s3); }
+.link-list li { display: flex; flex-direction: column; }
+.link-list .hint { margin-top: 0; }

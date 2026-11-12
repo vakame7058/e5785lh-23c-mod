@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response>
+<DeviceName>E5785Lh-23c</DeviceName>
+<SerialNumber>XXXXXXXXXXXXXXXX</SerialNumber>
+<Imei>350000000000000</Imei>
+<Imsi>001010000000000</Imsi>
+<Iccid>89358000000000000000</Iccid>
+<Msisdn></Msisdn>
+<HardwareVersion>CL1E5785SM Ver.A</HardwareVersion>
+<SoftwareVersion>21.191.63.02.00</SoftwareVersion>
+<WebUIVersion>00.00.00.000.03</WebUIVersion>
+<MacAddress1>00:11:22:33:44:55</MacAddress1>
+<MacAddress2></MacAddress2>
+<WanIPAddress>10.123.45.67</WanIPAddress>
+<wan_dns_address>192.0.2.53,192.0.2.54</wan_dns_address>
+<WanIPv6Address></WanIPv6Address>
+<ProductFamily>LTE</ProductFamily>
+<Classify>mobile-wifi</Classify>
+<supportmode>LTE|WCDMA|GSM</supportmode>
+<workmode>LTE</workmode>
+<uptime>5321</uptime>
+</response>

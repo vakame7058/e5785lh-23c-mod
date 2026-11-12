@@ -1,0 +1,1 @@
+case "$1" in list) echo "x|Профиль с очень-очень длинной подписью, которая не влезет в строку меню никак|2.0|1";; brief) echo "running=0|profile=x|label=|handshake=";; start) echo "awg-quick: не удалось поднять awg0 (нет ключа)" >&2; exit 1;; *) exit 2;; esac

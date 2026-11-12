@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response>
+<uptime_s>187234</uptime_s><load1>20.14</load1><load5>20.08</load5><load15>20.03</load15>
+<mem_total_kb>130164</mem_total_kb><mem_avail_kb>69212</mem_avail_kb><mem_avail_est>1</mem_avail_est><mem_used_kb>60952</mem_used_kb><mem_used_pct>47</mem_used_pct><mem_free_kb>48212</mem_free_kb><mem_cached_kb>21000</mem_cached_kb>
+<cpu_pct>37</cpu_pct><cpu_mhz>333</cpu_mhz><cpu_min_mhz>100</cpu_min_mhz><cpu_max_mhz>666</cpu_max_mhz>
+<sensors><sensor><name>battery</name><c>34.0</c></sensor><sensor><name>sim_card1</name><c>31.5</c></sensor><sensor><name>pa0</name><c>40.2</c></sensor><sensor><name>xo0</name><c>38.1</c></sensor></sensors>
+<bat_percent>87</bat_percent><bat_temp_c>34</bat_temp_c><bat_status>Charging</bat_status><bat_present>1</bat_present><bat_voltage_mv>4112</bat_voltage_mv>
+<disks>
+<disk><mount>/online</mount><total_kb>62976</total_kb><used_kb>12156</used_kb><free_kb>50820</free_kb></disk>
+<disk><mount>/app</mount><total_kb>40960</total_kb><used_kb>33280</used_kb><free_kb>7680</free_kb></disk>
+<disk><mount>/system</mount><total_kb>51200</total_kb><used_kb>47514</used_kb><free_kb>3686</free_kb></disk>
+</disks>
+<kernel>3.10.100</kernel><fw_version>21.191.63.02.00</fw_version><mod_version>bay3255</mod_version>
+<helper_version>1</helper_version><lua_version>Lua 5.1</lua_version>
+</response>

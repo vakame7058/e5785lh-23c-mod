@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response>
+<WifiIsolationBetween>0</WifiIsolationBetween>
+<WifiEnable>1</WifiEnable>
+<Wifioffenable>1</Wifioffenable>
+<Wifiofftime>1800</Wifiofftime>
+<WifiIsolate>0</WifiIsolate>
+<WifiCountry>US</WifiCountry>
+<WifiChannel>0</WifiChannel>
+<WifiMode>b/g/n</WifiMode>
+<pmf_switch>0</pmf_switch>
+<wifibandwidth>40</wifibandwidth>
+<wifiguestofftime>0</wifiguestofftime>
+</response>

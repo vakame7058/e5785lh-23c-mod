@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response><content>[Interface]
+PrivateKey = (скрыт)
+Address = 10.0.0.2/32
+
+[Peer]
+PublicKey = (открытый ключ сервера)
+Endpoint = vpn.example.com:51820
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25
+</content></response>

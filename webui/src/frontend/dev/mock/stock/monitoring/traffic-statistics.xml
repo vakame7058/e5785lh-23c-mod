@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response>
+<CurrentConnectTime>5321</CurrentConnectTime>
+<CurrentUpload>48213760</CurrentUpload>
+<CurrentDownload>812345678</CurrentDownload>
+<CurrentDownloadRate>1250000</CurrentDownloadRate>
+<CurrentUploadRate>154000</CurrentUploadRate>
+<TotalUpload>1048576000</TotalUpload>
+<TotalDownload>15032385536</TotalDownload>
+<TotalConnectTime>864000</TotalConnectTime>
+<showtraffic>1</showtraffic>
+</response>

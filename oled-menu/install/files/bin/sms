@@ -1,0 +1,7 @@
+#!/system/bin/busybox sh
+# sms с хуком веб-функций для секретного меню (SMS и USSD через /var/sms_webhook).
+# Нет библиотеки хука - sms запускается как обычно.
+if [ -f /app/hijacks/lib/sms_webhook.so ]; then
+    LD_PRELOAD="/app/hijacks/lib/sms_webhook.so" exec /app/bin/sms.orig "$@"
+fi
+exec /app/bin/sms.orig "$@"

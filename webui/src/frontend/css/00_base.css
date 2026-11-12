@@ -1,0 +1,146 @@
+/* Цвета, шрифты, шкала отступов. Цвета — токены Geist (vercel.com/geist/colors): серые gray-100…1000,
+   акценты blue/red/green/amber. Темы: по системе либо html[data-theme=light|dark].
+   Без внешних ресурсов и data: URI (CSP роутера запрещает и шрифты из data:). Шрифты лежат рядом:
+   /css/mod/font-geist-*.css — это woff2 с расширением .css, потому что веб роутера отдает только известные
+   расширения. Лицензия OFL — в начале app.css. */
+@font-face {
+  font-family: "Geist";
+  src: url("font-geist-sans.css") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Geist Mono";
+  src: url("font-geist-mono.css") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  /* шкала отступов: 4 / 8 / 12 / 16 / 24 / 32 */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --gap: var(--s4);          /* между карточками */
+  --pad: var(--s5);          /* поля страницы */
+  --card-pad: var(--s4);     /* внутренние поля карточки */
+  --content-w: 1760px;       /* ширина контента: до трех колонок карточек */
+  --label-w: 184px;          /* колонка подписей в формах */
+  --field-w: 440px;          /* наибольшая ширина поля */
+  --radius: 12px;            /* карточки, окна */
+  --radius-s: 6px;           /* кнопки, поля */
+  --side-w: 240px;
+  --top-h: 56px;
+  --font: "Geist", system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", Arial, sans-serif;
+  --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
+  /* светлая: background-200 #fafafa под страницей, background-100 #fff у карточек */
+  --bg: #fafafa;
+  --surface: #ffffff;
+  --surface-2: #f2f2f2;      /* gray-100: наведение, подложки */
+  --surface-3: #ebebeb;      /* gray-200: дорожки шкал */
+  --border: #ebebeb;         /* gray-400 */
+  --border-2: #c9c9c9;       /* gray-500: поля ввода */
+  --text: #171717;           /* gray-1000 */
+  --text-2: #4c4c4c;         /* gray-900 */
+  --text-3: #8f8f8f;         /* gray-700 */
+  --accent: #0068d6;         /* blue-900: ссылки, выбранное */
+  --accent-2: #0072f5;       /* blue-700: фокус, переключатели */
+  --accent-bg: #f0f7ff;      /* blue-100 */
+  --primary: #171717;        /* основная кнопка — инверсная */
+  --primary-hover: #383838;
+  --on-primary: #ffffff;
+  --ok: #297a3a;   --ok-bg: #effbef;   --ok-bar: #45a557;      /* green-900 / 100 / 700 */
+  --warn: #a35200; --warn-bg: #fff6e5; --warn-bar: #ffb224;    /* amber-900 / 100 / 700 */
+  --err: #cb2a2f;  --err-bg: #fff0f0;  --err-bar: #e5484d;     /* red-900 / 100 / 700 */
+  --err-fill: #da2f35;                                         /* red-800: только в окне подтверждения */
+  --info: #0068d6; --info-bg: #f0f7ff;
+  --shadow: none;
+  --shadow-2: 0 8px 30px rgba(0, 0, 0, .12);
+  --scrim: rgba(0, 0, 0, .4);
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  --bg: #000000;
+  --surface: #0a0a0a;
+  --surface-2: #1a1a1a;
+  --surface-3: #292929;
+  --border: #2e2e2e;
+  --border-2: #454545;
+  --text: #ededed;
+  --text-2: #a1a1a1;
+  --text-3: #8f8f8f;
+  --accent: #52a8ff;
+  --accent-2: #0072f5;
+  --accent-bg: #0f1c2e;
+  --primary: #ededed;
+  --primary-hover: #cccccc;
+  --on-primary: #0a0a0a;
+  --ok: #62c073;   --ok-bg: #0b2212;   --ok-bar: #45a557;
+  --warn: #f2a20d; --warn-bg: #291800; --warn-bar: #ffb224;
+  --err: #ff6166;  --err-bg: #2a1314;  --err-bar: #e5484d;
+  --err-fill: #d93036;
+  --info: #52a8ff; --info-bg: #0f1c2e;
+  --shadow-2: 0 8px 30px rgba(0, 0, 0, .6);
+  --scrim: rgba(0, 0, 0, .7);
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #000000;
+    --surface: #0a0a0a;
+    --surface-2: #1a1a1a;
+    --surface-3: #292929;
+    --border: #2e2e2e;
+    --border-2: #454545;
+    --text: #ededed;
+    --text-2: #a1a1a1;
+    --text-3: #8f8f8f;
+    --accent: #52a8ff;
+    --accent-2: #0072f5;
+    --accent-bg: #0f1c2e;
+    --primary: #ededed;
+    --primary-hover: #cccccc;
+    --on-primary: #0a0a0a;
+    --ok: #62c073;   --ok-bg: #0b2212;   --ok-bar: #45a557;
+    --warn: #f2a20d; --warn-bg: #291800; --warn-bar: #ffb224;
+    --err: #ff6166;  --err-bg: #2a1314;  --err-bar: #e5484d;
+    --err-fill: #d93036;
+    --info: #52a8ff; --info-bg: #0f1c2e;
+    --shadow-2: 0 8px 30px rgba(0, 0, 0, .6);
+    --scrim: rgba(0, 0, 0, .7);
+    color-scheme: dark;
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 var(--font);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100vh;
+}
+h1, h2, h3, h4 { margin: 0; font-weight: 600; line-height: 1.3; letter-spacing: -0.01em; }
+p { margin: 0; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+small { font-size: 12px; }
+code, pre, kbd, .mono { font-family: var(--mono); font-size: 13px; }
+button, input, select, textarea { font: inherit; color: inherit; }
+[hidden] { display: none !important; }
+.ico { flex: none; display: block; }
+:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+::selection { background: var(--accent-bg); }
+.boot { padding: var(--s6); text-align: center; color: var(--text-2); }
+.muted { color: var(--text-2); }
+.hint { display: block; color: var(--text-3); font-size: 12px; margin-top: var(--s1); line-height: 1.45; }
+.num { font-variant-numeric: tabular-nums; }

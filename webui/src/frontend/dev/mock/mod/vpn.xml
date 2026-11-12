@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response>
+<awg><installed>1</installed><configured>1</configured><up>1</up><autostart>0</autostart><dns_mode>operator</dns_mode><dns_server></dns_server><handshake_s>17</handshake_s><rx_bytes>48213760</rx_bytes><tx_bytes>5242880</tx_bytes><info>профиль «AWG2 · Дом», awg0 10.0.0.2/32, сервер vpn1.example.net:51820, весь трафик клиентов LAN через туннель, блокировка утечки, DNS клиентов: оператора, мимо туннеля, движок модуль ядра</info><engine>kernel</engine><engine_fallback>0</engine_fallback></awg>
+<wg><configured>1</configured><up>0</up><autostart>0</autostart><autostart_mod>0</autostart_mod></wg>
+<ovpn><configured>0</configured><up>0</up><autostart>0</autostart></ovpn>
+</response>

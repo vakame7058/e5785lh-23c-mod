@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response><Count>3</Count><Messages>
+<Message><Smstat>0</Smstat><Index>40003</Index><Phone>900</Phone><Content>Баланс: 312,40 р. Пакет интернета: осталось 14,2 ГБ до 05.11.</Content><Date>2026-10-29 14:02:11</Date><Sca></Sca><SaveType>4</SaveType><Priority>0</Priority><SmsType>1</SmsType></Message>
+<Message><Smstat>0</Smstat><Index>40002</Index><Phone>+7 900 000-00-01</Phone><Content>Проверка: сообщение с длинным текстом, чтобы посмотреть перенос строк в списке сообщений на узком экране телефона и в широкой колонке на компьютере.</Content><Date>2026-10-29 12:40:55</Date><Sca></Sca><SaveType>4</SaveType><Priority>0</Priority><SmsType>1</SmsType></Message>
+<Message><Smstat>1</Smstat><Index>40001</Index><Phone>Operator</Phone><Content>Добро пожаловать в сеть.</Content><Date>2026-10-28 09:15:00</Date><Sca></Sca><SaveType>4</SaveType><Priority>0</Priority><SmsType>1</SmsType></Message>
+</Messages></response>

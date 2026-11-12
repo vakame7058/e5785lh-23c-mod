@@ -1,0 +1,203 @@
+# Набор для секретного меню E5785Lh-23c (мод bay3255 v5, прошивка 21.191.63.02).
+# Ставит install.sh (SMS=1 - вместе с SMS/USSD, DEBUG=0 - без журнала), откатывает rollback.sh.
+# Файл набора лежит в files/ по пути без /app/. Поля через пробел, назначение - до конца строки.
+#
+# FILE компонент путь_на_роутере md5 права размер_Б назначение
+#   права для новых файлов; у заменяемых сохраняются текущие права и владелец
+FILE core /app/hijacks/lib/oled_hijack.so 20e5b12834b22b165d74877f27286044 0775 237980 меню экрана: hijack_ng 0807e72, свой главный экран, значки и сглаженный шрифт, пункт 13 родного меню, анимация, Номер SIM, VPN, DNS, Орбита
+FILE core /app/hijacks/oled_cfg/menue.xml f4773749d3fdf7a527263dec7b0e0943 0644 21792 родное меню: у пункта 13 стрелка вместо переключателя (тип 0, элемент 2, как у пункта 3)
+FILE core /app/hijacks/oled_cfg/res/lang_russian.xml f45bdeef1266e195bfd10275d8610faf 0644 6184 подпись пункта 13: Расширенные
+FILE core /app/hijacks/oled_cfg/res/lang_english.xml 9f366ae753d978dd9f14bff165b0696f 0644 5196 подпись пункта 13: Advanced
+FILE core /app/hijacks/bootanim/frames.bin 32c5b420528906de30eb9429e553d4fa 0644 2162688 кадры анимации 128x128 RGB565, старший байт первым, 32768 Б на кадр
+FILE core /app/hijacks/bootanim/durations 9372e6d31598ce0a2b7dda6c496cf60c 0644 198 длительность кадров в мс, по строке на кадр
+FILE core /app/hijacks/bin/hijlua cf71881e2a938eae0db20802131309df 0755 4208 luarun: Lua 5.1 роутера с модулями dm, sys, xml из librestcore
+FILE core /app/hijacks/bin/luarun 848bb7696582c8c2835d411c58c50d61 0755 215 запуск hijlua с LD_LIBRARY_PATH=/app/lib
+FILE core /app/hijacks/scripts/wifi.sh 31d0d5490c4c89f3b52eb623bd74c5aa 0755 16625 Wi-Fi: вкл/выкл, клиенты, запрет по MAC (через luarun)
+FILE core /app/hijacks/scripts/speedtest.sh c9327ebaa9bde6eff58304248c14738b 0755 8892 тест скорости: прием, затем передача (upload_url), по списку серверов веб-интерфейса
+FILE core /app/hijacks/scripts/sim_number.sh 88bb8c8fcc6b4767595c20a534abf943 0755 1846 номер SIM: Msisdn или кэш веб-интерфейса
+FILE core /app/hijacks/scripts/radio_mode.sh b3ccd1d06e4be17ee4e786524dca9fbc 0755 1885 режим сети, русский текст
+FILE core /app/hijacks/scripts/no_battery_mode.sh c98857ead588afbe8e6ce96bb817d63b 0755 1956 работа без батареи, русский текст
+FILE core /app/hijacks/scripts/user_scripts.sh 1920596b72f449436d3247207cb54024 0755 2801 свои скрипты: scripts/user/*.sh набора и /online/scripts/*.sh
+FILE core /app/hijacks/scripts/vpn_menu.sh 9be3f494cc763a81d23d58213ede42d7 0755 5682 VPN: состояние, вкл/выкл, выбор профиля, раздельный VPN через /online/mod/pkg/awg/svc.sh
+FILE core /app/hijacks/scripts/dns_menu.sh 116ae15bd9cb0a199d1fa98e463565e4 0755 7624 DNS: вкл/выкл, выбор сервера и блокировка рекламы через /online/mod/pkg/dns/svc.sh
+FILE core /app/hijacks/scripts/user/pinger.sh dd60b59acb8ec01b916a6fc2e3b6ff15 0755 3431 Проверка связи: пинг 8.8.8.8, при потере - перезапуск радио
+FILE core /app/hijacks/scripts/user/fix_cell.sh e2d34e1cad4e7aa465766c55ed2eceb6 0755 4413 Привязка к соте: NV 53810 и сброс nvsys
+FILE core /app/hijacks/conf/nv50018_req.bin 41393d7b954765cebb7674553835b2f0 0644 46 запрос сброса nvsys для /dev/nv (NV 50018, 46 Б)
+FILE core /app/hijacks/conf/operators.txt fb3292ef5540302a50869d5506c5a497 0644 1065 главный экран: короткие имена операторов по MCC-MNC (свой файл - /online/mod/conf/operators.txt)
+FILE debug /app/hijacks/bootanim/debug 0ca2c361ea9adcfd4bd19c444447da09 0644 150 метка: есть файл - журнал анимации и запуска скриптов в /var/hijack_bootanim.log
+FILE sms /app/hijacks/lib/sms_webhook.so 43739eecf9300b5c68437ceba8c39ba0 0775 6412 хук веб-функций в процессе sms, сокет /var/sms_webhook, исправленный readlink
+FILE sms /app/hijacks/bin/sms_webhook_client b68b74af58cb44731637122ebc0bbff4 0775 3604 клиент сокета /var/sms_webhook
+FILE sms /app/hijacks/scripts/sms_and_ussd.sh cb9e44e9f7c0266c23e9b10e15c7a19e 0755 8392 SMS и USSD (через sms_webhook_client и luarun)
+FILE sms /app/bin/sms 4482bebd52314293ea64b11d5025f557 0775 392 обертка: LD_PRELOAD=sms_webhook.so exec /app/bin/sms.orig
+#
+# MOVE компонент откуда куда - программа переименовывается, на ее место встает обертка
+MOVE sms /app/bin/sms /app/bin/sms.orig
+#
+# ORIG путь md5 - известные версии, которые можно заменять (строк на путь может быть несколько)
+ORIG /app/hijacks/lib/oled_hijack.so adc0aef0705a82b4f2c3c09c66ee33c0 мод bay v5
+ORIG /app/hijacks/lib/oled_hijack.so c8fad05f90725cc52f52d239ac80dbb8 набор 1
+ORIG /app/hijacks/lib/oled_hijack.so 3b5658a31de5e922411aacfdd34fb714 набор 2 (стоит сейчас)
+ORIG /app/hijacks/oled_cfg/res/lang_russian.xml 8a89032696d09db0ade09739dc95800e набор 1
+ORIG /app/hijacks/oled_cfg/res/lang_russian.xml f45bdeef1266e195bfd10275d8610faf набор 2
+ORIG /app/hijacks/oled_cfg/res/lang_english.xml 9f366ae753d978dd9f14bff165b0696f набор 1 и 2
+ORIG /app/hijacks/bootanim/frames.bin d51f98b48dc6eaabb814b74cfbabf295 набор 1 и 2
+ORIG /app/hijacks/bootanim/durations 279186bfc831563ad02b188843a9f424 набор 1 и 2
+ORIG /app/hijacks/scripts/radio_mode.sh 20b83f2743f6bf9e38bad6a4e635578a мод bay v5
+ORIG /app/hijacks/scripts/no_battery_mode.sh a85c55edfce26de9e53b4263b34fa089 мод bay v5
+ORIG /app/hijacks/scripts/user_scripts.sh e60eeb7824ab6b2f51cd53587a5e74e6 мод bay v5
+ORIG /app/bin/sms 0492975ba9b06f68592394cf7980bf66 мод bay v5 (программа sms)
+ORIG /app/hijacks/lib/oled_hijack.so 75cd0c3d45447cddb945d9eda433f48f набор 3
+ORIG /app/hijacks/oled_cfg/menue.xml f4773749d3fdf7a527263dec7b0e0943 набор 3
+ORIG /app/hijacks/oled_cfg/res/lang_russian.xml f45bdeef1266e195bfd10275d8610faf набор 3
+ORIG /app/hijacks/oled_cfg/res/lang_english.xml 9f366ae753d978dd9f14bff165b0696f набор 3
+ORIG /app/hijacks/bootanim/frames.bin 32c5b420528906de30eb9429e553d4fa набор 3
+ORIG /app/hijacks/bootanim/durations 9372e6d31598ce0a2b7dda6c496cf60c набор 3
+ORIG /app/hijacks/bin/hijlua cf71881e2a938eae0db20802131309df набор 3
+ORIG /app/hijacks/bin/luarun 848bb7696582c8c2835d411c58c50d61 набор 3
+ORIG /app/hijacks/scripts/wifi.sh 31d0d5490c4c89f3b52eb623bd74c5aa набор 3
+ORIG /app/hijacks/scripts/speedtest.sh a647a84fbe681aa0f65b3eaee15c6df5 набор 3
+ORIG /app/hijacks/scripts/sim_number.sh cbb2df9edf7f13e7bfae72e6169f0b3c набор 3
+ORIG /app/hijacks/scripts/radio_mode.sh 57db1ebeb8938959a0a032464e319439 набор 3
+ORIG /app/hijacks/scripts/no_battery_mode.sh 0d2c42cf47fc27402495b5f39cc6dd90 набор 3
+ORIG /app/hijacks/scripts/user_scripts.sh 359fbe2065372a705c52ff3121e2945c набор 3
+ORIG /app/hijacks/lib/sms_webhook.so 43739eecf9300b5c68437ceba8c39ba0 набор 3
+ORIG /app/hijacks/bin/sms_webhook_client b68b74af58cb44731637122ebc0bbff4 набор 3
+ORIG /app/hijacks/scripts/sms_and_ussd.sh 09af6b88f8a97ec6f97ad650f363f762 набор 3
+ORIG /app/bin/sms 4482bebd52314293ea64b11d5025f557 набор 3
+ORIG /app/hijacks/lib/oled_hijack.so 13b0efba533826dc6974064b3923be50 набор 4
+ORIG /app/hijacks/oled_cfg/menue.xml f4773749d3fdf7a527263dec7b0e0943 набор 4
+ORIG /app/hijacks/oled_cfg/res/lang_russian.xml f45bdeef1266e195bfd10275d8610faf набор 4
+ORIG /app/hijacks/oled_cfg/res/lang_english.xml 9f366ae753d978dd9f14bff165b0696f набор 4
+ORIG /app/hijacks/bootanim/frames.bin 32c5b420528906de30eb9429e553d4fa набор 4
+ORIG /app/hijacks/bootanim/durations 9372e6d31598ce0a2b7dda6c496cf60c набор 4
+ORIG /app/hijacks/bin/hijlua cf71881e2a938eae0db20802131309df набор 4
+ORIG /app/hijacks/bin/luarun 848bb7696582c8c2835d411c58c50d61 набор 4
+ORIG /app/hijacks/scripts/wifi.sh 31d0d5490c4c89f3b52eb623bd74c5aa набор 4
+ORIG /app/hijacks/scripts/speedtest.sh 09063fade4c59a7c489c4504b0b8691f набор 4
+ORIG /app/hijacks/scripts/sim_number.sh d8dbbbf27e49cbfa9003fae3d03d145e набор 4
+ORIG /app/hijacks/scripts/radio_mode.sh b3ccd1d06e4be17ee4e786524dca9fbc набор 4
+ORIG /app/hijacks/scripts/no_battery_mode.sh c98857ead588afbe8e6ce96bb817d63b набор 4
+ORIG /app/hijacks/scripts/user_scripts.sh 757e107d7bcb3e394f562aa28f300e1c набор 4
+ORIG /app/hijacks/bootanim/debug 0ca2c361ea9adcfd4bd19c444447da09 набор 4
+ORIG /app/hijacks/lib/sms_webhook.so 43739eecf9300b5c68437ceba8c39ba0 набор 4
+ORIG /app/hijacks/bin/sms_webhook_client b68b74af58cb44731637122ebc0bbff4 набор 4
+ORIG /app/hijacks/scripts/sms_and_ussd.sh 16779bcb028015a077b71c8f0cce2b71 набор 4
+ORIG /app/bin/sms 4482bebd52314293ea64b11d5025f557 набор 4
+ORIG /app/hijacks/lib/oled_hijack.so 1f7d19730e35299936d4747a8891f771 набор 5
+ORIG /app/hijacks/oled_cfg/menue.xml f4773749d3fdf7a527263dec7b0e0943 набор 5
+ORIG /app/hijacks/oled_cfg/res/lang_russian.xml f45bdeef1266e195bfd10275d8610faf набор 5
+ORIG /app/hijacks/oled_cfg/res/lang_english.xml 9f366ae753d978dd9f14bff165b0696f набор 5
+ORIG /app/hijacks/bootanim/frames.bin 32c5b420528906de30eb9429e553d4fa набор 5
+ORIG /app/hijacks/bootanim/durations 9372e6d31598ce0a2b7dda6c496cf60c набор 5
+ORIG /app/hijacks/bin/hijlua cf71881e2a938eae0db20802131309df набор 5
+ORIG /app/hijacks/bin/luarun 848bb7696582c8c2835d411c58c50d61 набор 5
+ORIG /app/hijacks/scripts/wifi.sh 31d0d5490c4c89f3b52eb623bd74c5aa набор 5
+ORIG /app/hijacks/scripts/speedtest.sh c9327ebaa9bde6eff58304248c14738b набор 5
+ORIG /app/hijacks/scripts/sim_number.sh d8dbbbf27e49cbfa9003fae3d03d145e набор 5
+ORIG /app/hijacks/scripts/radio_mode.sh b3ccd1d06e4be17ee4e786524dca9fbc набор 5
+ORIG /app/hijacks/scripts/no_battery_mode.sh c98857ead588afbe8e6ce96bb817d63b набор 5
+ORIG /app/hijacks/scripts/user_scripts.sh 757e107d7bcb3e394f562aa28f300e1c набор 5
+ORIG /app/hijacks/bootanim/debug 0ca2c361ea9adcfd4bd19c444447da09 набор 5
+ORIG /app/hijacks/lib/sms_webhook.so 43739eecf9300b5c68437ceba8c39ba0 набор 5
+ORIG /app/hijacks/bin/sms_webhook_client b68b74af58cb44731637122ebc0bbff4 набор 5
+ORIG /app/hijacks/scripts/sms_and_ussd.sh 16779bcb028015a077b71c8f0cce2b71 набор 5
+ORIG /app/bin/sms 4482bebd52314293ea64b11d5025f557 набор 5
+ORIG /app/hijacks/lib/oled_hijack.so f729cfd22a798169994def06c08e76b1 набор 6
+ORIG /app/hijacks/oled_cfg/menue.xml f4773749d3fdf7a527263dec7b0e0943 набор 6
+ORIG /app/hijacks/oled_cfg/res/lang_russian.xml f45bdeef1266e195bfd10275d8610faf набор 6
+ORIG /app/hijacks/oled_cfg/res/lang_english.xml 9f366ae753d978dd9f14bff165b0696f набор 6
+ORIG /app/hijacks/bootanim/frames.bin 32c5b420528906de30eb9429e553d4fa набор 6
+ORIG /app/hijacks/bootanim/durations 9372e6d31598ce0a2b7dda6c496cf60c набор 6
+ORIG /app/hijacks/bin/hijlua cf71881e2a938eae0db20802131309df набор 6
+ORIG /app/hijacks/bin/luarun 848bb7696582c8c2835d411c58c50d61 набор 6
+ORIG /app/hijacks/scripts/wifi.sh 31d0d5490c4c89f3b52eb623bd74c5aa набор 6
+ORIG /app/hijacks/scripts/speedtest.sh c9327ebaa9bde6eff58304248c14738b набор 6
+ORIG /app/hijacks/scripts/sim_number.sh 88bb8c8fcc6b4767595c20a534abf943 набор 6
+ORIG /app/hijacks/scripts/radio_mode.sh b3ccd1d06e4be17ee4e786524dca9fbc набор 6
+ORIG /app/hijacks/scripts/no_battery_mode.sh c98857ead588afbe8e6ce96bb817d63b набор 6
+ORIG /app/hijacks/scripts/user_scripts.sh 1920596b72f449436d3247207cb54024 набор 6
+ORIG /app/hijacks/scripts/vpn_menu.sh c46d588b53cbb6473bffa2c1b9d4a2e0 набор 6
+ORIG /app/hijacks/scripts/user/pinger.sh dd60b59acb8ec01b916a6fc2e3b6ff15 набор 6
+ORIG /app/hijacks/scripts/user/fix_cell.sh e2d34e1cad4e7aa465766c55ed2eceb6 набор 6
+ORIG /app/hijacks/conf/nv50018_req.bin 41393d7b954765cebb7674553835b2f0 набор 6
+ORIG /app/hijacks/bootanim/debug 0ca2c361ea9adcfd4bd19c444447da09 набор 6
+ORIG /app/hijacks/lib/sms_webhook.so 43739eecf9300b5c68437ceba8c39ba0 набор 6
+ORIG /app/hijacks/bin/sms_webhook_client b68b74af58cb44731637122ebc0bbff4 набор 6
+ORIG /app/hijacks/scripts/sms_and_ussd.sh cb9e44e9f7c0266c23e9b10e15c7a19e набор 6
+ORIG /app/bin/sms 4482bebd52314293ea64b11d5025f557 набор 6
+ORIG /app/hijacks/lib/oled_hijack.so 9188b77ca4a862d3de1ce8aeb2818b91 набор 7
+ORIG /app/hijacks/oled_cfg/menue.xml f4773749d3fdf7a527263dec7b0e0943 набор 7
+ORIG /app/hijacks/oled_cfg/res/lang_russian.xml f45bdeef1266e195bfd10275d8610faf набор 7
+ORIG /app/hijacks/oled_cfg/res/lang_english.xml 9f366ae753d978dd9f14bff165b0696f набор 7
+ORIG /app/hijacks/bootanim/frames.bin 32c5b420528906de30eb9429e553d4fa набор 7
+ORIG /app/hijacks/bootanim/durations 9372e6d31598ce0a2b7dda6c496cf60c набор 7
+ORIG /app/hijacks/bin/hijlua cf71881e2a938eae0db20802131309df набор 7
+ORIG /app/hijacks/bin/luarun 848bb7696582c8c2835d411c58c50d61 набор 7
+ORIG /app/hijacks/scripts/wifi.sh 31d0d5490c4c89f3b52eb623bd74c5aa набор 7
+ORIG /app/hijacks/scripts/speedtest.sh c9327ebaa9bde6eff58304248c14738b набор 7
+ORIG /app/hijacks/scripts/sim_number.sh 88bb8c8fcc6b4767595c20a534abf943 набор 7
+ORIG /app/hijacks/scripts/radio_mode.sh b3ccd1d06e4be17ee4e786524dca9fbc набор 7
+ORIG /app/hijacks/scripts/no_battery_mode.sh c98857ead588afbe8e6ce96bb817d63b набор 7
+ORIG /app/hijacks/scripts/user_scripts.sh 1920596b72f449436d3247207cb54024 набор 7
+ORIG /app/hijacks/scripts/vpn_menu.sh c46d588b53cbb6473bffa2c1b9d4a2e0 набор 7
+ORIG /app/hijacks/scripts/user/pinger.sh dd60b59acb8ec01b916a6fc2e3b6ff15 набор 7
+ORIG /app/hijacks/scripts/user/fix_cell.sh e2d34e1cad4e7aa465766c55ed2eceb6 набор 7
+ORIG /app/hijacks/conf/nv50018_req.bin 41393d7b954765cebb7674553835b2f0 набор 7
+ORIG /app/hijacks/conf/operators.txt fb3292ef5540302a50869d5506c5a497 набор 7
+ORIG /app/hijacks/bootanim/debug 0ca2c361ea9adcfd4bd19c444447da09 набор 7
+ORIG /app/hijacks/lib/sms_webhook.so 43739eecf9300b5c68437ceba8c39ba0 набор 7
+ORIG /app/hijacks/bin/sms_webhook_client b68b74af58cb44731637122ebc0bbff4 набор 7
+ORIG /app/hijacks/scripts/sms_and_ussd.sh cb9e44e9f7c0266c23e9b10e15c7a19e набор 7
+ORIG /app/bin/sms 4482bebd52314293ea64b11d5025f557 набор 7
+ORIG /app/hijacks/lib/oled_hijack.so 81b1039ec66a2d54d73145cbbb2bfde4 набор 8
+ORIG /app/hijacks/oled_cfg/menue.xml f4773749d3fdf7a527263dec7b0e0943 набор 8
+ORIG /app/hijacks/oled_cfg/res/lang_russian.xml f45bdeef1266e195bfd10275d8610faf набор 8
+ORIG /app/hijacks/oled_cfg/res/lang_english.xml 9f366ae753d978dd9f14bff165b0696f набор 8
+ORIG /app/hijacks/bootanim/frames.bin 32c5b420528906de30eb9429e553d4fa набор 8
+ORIG /app/hijacks/bootanim/durations 9372e6d31598ce0a2b7dda6c496cf60c набор 8
+ORIG /app/hijacks/bin/hijlua cf71881e2a938eae0db20802131309df набор 8
+ORIG /app/hijacks/bin/luarun 848bb7696582c8c2835d411c58c50d61 набор 8
+ORIG /app/hijacks/scripts/wifi.sh 31d0d5490c4c89f3b52eb623bd74c5aa набор 8
+ORIG /app/hijacks/scripts/speedtest.sh c9327ebaa9bde6eff58304248c14738b набор 8
+ORIG /app/hijacks/scripts/sim_number.sh 88bb8c8fcc6b4767595c20a534abf943 набор 8
+ORIG /app/hijacks/scripts/radio_mode.sh b3ccd1d06e4be17ee4e786524dca9fbc набор 8
+ORIG /app/hijacks/scripts/no_battery_mode.sh c98857ead588afbe8e6ce96bb817d63b набор 8
+ORIG /app/hijacks/scripts/user_scripts.sh 1920596b72f449436d3247207cb54024 набор 8
+ORIG /app/hijacks/scripts/vpn_menu.sh c46d588b53cbb6473bffa2c1b9d4a2e0 набор 8
+ORIG /app/hijacks/scripts/user/pinger.sh dd60b59acb8ec01b916a6fc2e3b6ff15 набор 8
+ORIG /app/hijacks/scripts/user/fix_cell.sh e2d34e1cad4e7aa465766c55ed2eceb6 набор 8
+ORIG /app/hijacks/conf/nv50018_req.bin 41393d7b954765cebb7674553835b2f0 набор 8
+ORIG /app/hijacks/conf/operators.txt fb3292ef5540302a50869d5506c5a497 набор 8
+ORIG /app/hijacks/bootanim/debug 0ca2c361ea9adcfd4bd19c444447da09 набор 8
+ORIG /app/hijacks/lib/sms_webhook.so 43739eecf9300b5c68437ceba8c39ba0 набор 8
+ORIG /app/hijacks/bin/sms_webhook_client b68b74af58cb44731637122ebc0bbff4 набор 8
+ORIG /app/hijacks/scripts/sms_and_ussd.sh cb9e44e9f7c0266c23e9b10e15c7a19e набор 8
+ORIG /app/bin/sms 4482bebd52314293ea64b11d5025f557 набор 8
+ORIG /app/hijacks/lib/oled_hijack.so 20e5b12834b22b165d74877f27286044 набор 9
+ORIG /app/hijacks/oled_cfg/menue.xml f4773749d3fdf7a527263dec7b0e0943 набор 9
+ORIG /app/hijacks/oled_cfg/res/lang_russian.xml f45bdeef1266e195bfd10275d8610faf набор 9
+ORIG /app/hijacks/oled_cfg/res/lang_english.xml 9f366ae753d978dd9f14bff165b0696f набор 9
+ORIG /app/hijacks/bootanim/frames.bin 32c5b420528906de30eb9429e553d4fa набор 9
+ORIG /app/hijacks/bootanim/durations 9372e6d31598ce0a2b7dda6c496cf60c набор 9
+ORIG /app/hijacks/bin/hijlua cf71881e2a938eae0db20802131309df набор 9
+ORIG /app/hijacks/bin/luarun 848bb7696582c8c2835d411c58c50d61 набор 9
+ORIG /app/hijacks/scripts/wifi.sh 31d0d5490c4c89f3b52eb623bd74c5aa набор 9
+ORIG /app/hijacks/scripts/speedtest.sh c9327ebaa9bde6eff58304248c14738b набор 9
+ORIG /app/hijacks/scripts/sim_number.sh 88bb8c8fcc6b4767595c20a534abf943 набор 9
+ORIG /app/hijacks/scripts/radio_mode.sh b3ccd1d06e4be17ee4e786524dca9fbc набор 9
+ORIG /app/hijacks/scripts/no_battery_mode.sh c98857ead588afbe8e6ce96bb817d63b набор 9
+ORIG /app/hijacks/scripts/user_scripts.sh 1920596b72f449436d3247207cb54024 набор 9
+ORIG /app/hijacks/scripts/vpn_menu.sh c46d588b53cbb6473bffa2c1b9d4a2e0 набор 9
+ORIG /app/hijacks/scripts/dns_menu.sh 116ae15bd9cb0a199d1fa98e463565e4 набор 9
+ORIG /app/hijacks/scripts/user/pinger.sh dd60b59acb8ec01b916a6fc2e3b6ff15 набор 9
+ORIG /app/hijacks/scripts/user/fix_cell.sh e2d34e1cad4e7aa465766c55ed2eceb6 набор 9
+ORIG /app/hijacks/conf/nv50018_req.bin 41393d7b954765cebb7674553835b2f0 набор 9
+ORIG /app/hijacks/conf/operators.txt fb3292ef5540302a50869d5506c5a497 набор 9
+ORIG /app/hijacks/bootanim/debug 0ca2c361ea9adcfd4bd19c444447da09 набор 9
+ORIG /app/hijacks/lib/sms_webhook.so 43739eecf9300b5c68437ceba8c39ba0 набор 9
+ORIG /app/hijacks/bin/sms_webhook_client b68b74af58cb44731637122ebc0bbff4 набор 9
+ORIG /app/hijacks/scripts/sms_and_ussd.sh cb9e44e9f7c0266c23e9b10e15c7a19e набор 9
+ORIG /app/bin/sms 4482bebd52314293ea64b11d5025f557 набор 9
+#
+# Не меняются: /app/hijacks/lib/web_hook.so f62ff16f22c476b14e22fdabb4017014, /app/hijacks/bin/web_hook_client bbaeb153cf5d4dde7d308947f949551b,
+#   /app/hijacks/lib/cms_hijack.so 59d399d904dec93b78c1aa63f2a997a8, ttl_and_imei.sh, vpn.sh, example.sh, обертки oled, cms, device

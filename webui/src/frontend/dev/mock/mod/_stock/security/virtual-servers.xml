@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response><Servers>
+<Server><VirtualServerIPName>Камера</VirtualServerIPName><VirtualServerStatus>1</VirtualServerStatus><VirtualServerRemoteIP></VirtualServerRemoteIP><VirtualServerWanPort>8080</VirtualServerWanPort><VirtualServerWanEndPort>8080</VirtualServerWanEndPort><VirtualServerLanPort>80</VirtualServerLanPort><VirtualServerLanEndPort>80</VirtualServerLanEndPort><VirtualServerIPAddress>192.168.1.50</VirtualServerIPAddress><VirtualServerProtocol>6</VirtualServerProtocol></Server>
+</Servers><virtualserverexcludeports><excludeport><virtual_server_special_ports>53,80</virtual_server_special_ports><virtual_server_special_portintervals></virtual_server_special_portintervals></excludeport></virtualserverexcludeports></response>

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response><Count>5</Count><Messages>
+<Message><Smstat>0</Smstat><Index>40005</Index><Phone>+7 900 000-00-01</Phone><Content>Мой новый номер +7 900 000-00-02, запиши.</Content><Date>2026-10-29 17:05:10</Date><Sca></Sca><SaveType>4</SaveType><Priority>0</Priority><SmsType>1</SmsType></Message>
+<Message><Smstat>0</Smstat><Index>40004</Index><Phone>OPERATOR</Phone><Content>Ваш номер: +7 (900) 000-00-03.</Content><Date>2026-10-29 16:58:54</Date><Sca></Sca><SaveType>4</SaveType><Priority>0</Priority><SmsType>1</SmsType></Message>
+<Message><Smstat>0</Smstat><Index>40003</Index><Phone>900</Phone><Content>Баланс: 312,40 р. Пакет интернета: осталось 14,2 ГБ до 05.11.</Content><Date>2026-10-29 14:02:11</Date><Sca></Sca><SaveType>4</SaveType><Priority>0</Priority><SmsType>1</SmsType></Message>
+<Message><Smstat>1</Smstat><Index>40002</Index><Phone>OPERATOR</Phone><Content>Ваш номер: 8 900 000-00-04</Content><Date>2026-10-20 10:00:00</Date><Sca></Sca><SaveType>4</SaveType><Priority>0</Priority><SmsType>1</SmsType></Message>
+<Message><Smstat>1</Smstat><Index>40001</Index><Phone>Operator</Phone><Content>Добро пожаловать в сеть.</Content><Date>2026-10-28 09:15:00</Date><Sca></Sca><SaveType>4</SaveType><Priority>0</Priority><SmsType>1</SmsType></Message>
+</Messages></response>

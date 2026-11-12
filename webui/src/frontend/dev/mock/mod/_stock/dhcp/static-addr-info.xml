@@ -1,0 +1,1 @@
+<?xml version="1.0" encoding="UTF-8"?><response><Hosts><Host><HostIndex>1</HostIndex><ID>InternetGatewayDevice.LANDevice.1.LANHostConfigManagement.DHCPStaticAddress.1.</ID><HostEnabled>1</HostEnabled><HostHw>00:11:22:33:44:66</HostHw><HostIp>192.168.1.50</HostIp></Host></Hosts></response>

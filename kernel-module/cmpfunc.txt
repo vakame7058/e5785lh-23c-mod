@@ -1,0 +1,57 @@
+skbuff.o: functions 81, identical 80, words 5311/5312 equal
+   DIFF skb_trim                                 size    60  differing words   1  first offs ['0x30']
+dev.o: functions 147, identical 117, words 6903/6939 equal
+   DIFF net_tx_action                            size   404  differing words   1  first offs ['0x118']
+   DIFF net_rx_action                            size   496  differing words   1  first offs ['0x1b0']
+   DIFF napi_gro_complete                        size   192  differing words   1  first offs ['0xac']
+   DIFF __netdev_upper_dev_link                  size   512  differing words   1  first offs ['0x1e0']
+   DIFF unlist_netdevice                         size   208  differing words   1  first offs ['0xb4']
+   DIFF list_netdevice                           size   272  differing words   1  first offs ['0xf4']
+   DIFF __dev_set_promiscuity                    size   340  differing words   1  first offs ['0x80']
+   DIFF __dev_close_many                         size   204  differing words   1  first offs ['0xb0']
+   DIFF rollback_registered_many                 size   556  differing words   3  first offs ['0x5c', '0x1f0', '0x200']
+   DIFF __dev_open                               size   264  differing words   1  first offs ['0xec']
+   DIFF netdev_master_upper_dev_get              size    92  differing words   1  first offs ['0x40']
+   DIFF netdev_has_any_upper_dev                 size    72  differing words   1  first offs ['0x2c']
+   DIFF netdev_has_upper_dev                     size   128  differing words   1  first offs ['0x64']
+   DIFF netdev_rx_handler_register               size    92  differing words   1  first offs ['0x40']
+   DIFF __dev_getfirstbyhwtype                   size   132  differing words   1  first offs ['0x68']
+   DIFF netdev_rx_handler_unregister             size    72  differing words   1  first offs ['0x2c']
+   DIFF netdev_upper_dev_unlink                  size   188  differing words   1  first offs ['0xa0']
+   DIFF netif_set_real_num_tx_queues             size   420  differing words   1  first offs ['0x180']
+   DIFF call_netdevice_notifiers                 size    80  differing words   1  first offs ['0x30']
+   DIFF unregister_netdevice_queue               size   156  differing words   1  first offs ['0x7c']
+   DIFF dev_loopback_xmit                        size   188  differing words   1  first offs ['0xa4']
+   DIFF dev_change_net_namespace                 size   472  differing words   2  first offs ['0x1ac', '0x1c4']
+   DIFF dev_change_name                          size   648  differing words   1  first offs ['0x264']
+   DIFF dev_set_alias                            size   164  differing words   1  first offs ['0x88']
+   DIFF dev_set_allmulti                         size   196  differing words   1  first offs ['0xa4']
+   DIFF __dev_change_flags                       size   304  differing words   1  first offs ['0x10c']
+   DIFF __netdev_update_features                 size  1132  differing words   1  first offs ['0x36c']
+   DIFF register_netdevice                       size   920  differing words   2  first offs ['0x218', '0x368']
+   DIFF dev_disable_lro                          size   140  differing words   1  first offs ['0x54']
+   DIFF netdev_run_todo                          size   804  differing words   3  first offs ['0x2c8', '0x2f0', '0x300']
+sock.o: functions 87, identical 82, words 3440/3571 equal
+   DIFF sk_clear_memalloc                        size   128  differing words   1  first offs ['0x48']
+   DIFF release_sock                             size   364  differing words   1  first offs ['0x150']
+   DIFF sk_clone_lock                            size   688  differing words 125  first offs ['0x18', '0x9c', '0xa0', '0xa4', '0xa8', '0xac']
+   DIFF sock_getsockopt                          size  1832  differing words   1  first offs ['0x33c']
+   DIFF sock_setsockopt                          size  2288  differing words   3  first offs ['0x690', '0x70c', '0x738']
+udp.o: functions 50, identical 50, words 4111/4111 equal
+genetlink.o: functions 28, identical 28, words 1307/1307 equal
+rtnetlink.o: functions 59, identical 59, words 3671/3671 equal
+timer.o: functions 64, identical 64, words 2165/2165 equal
+workqueue.o: functions 94, identical 94, words 4745/4745 equal
+route.o: functions 65, identical 65, words 3411/3411 equal
+ip6_output.o: functions 19, identical 16, words 2973/3351 equal
+   DIFF ip6_append_data                          size  3468  differing words 375  first offs ['0xdc', '0x110', '0x138', '0x198', '0x264', '0x2a0']
+   DIFF ip6_push_pending_frames                  size  1180  differing words   1  first offs ['0x360']
+   DIFF ip6_fragment                             size  2848  differing words   2  first offs ['0x398', '0x59c']
+flow_dissector.o: functions 6, identical 6, words 499/499 equal
+socket.o: functions 107, identical 107, words 3863/3863 equal
+ip_output.o: functions 24, identical 23, words 3042/3043 equal
+   DIFF __ip_append_data                         size  2332  differing words   1  first offs ['0x8fc']
+dst.o: functions 12, identical 12, words 503/503 equal
+module.o: functions 85, identical 83, words 4662/4665 equal
+   DIFF module_arch_cleanup                      size     4  differing words   1  first offs ['0x0']
+   DIFF module_finalize                          size     8  differing words   2  first offs ['0x0', '0x4']

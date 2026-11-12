@@ -1,0 +1,29 @@
+#!/system/bin/busyboxx sh
+# Сторож помощника (root). Раз в 30 с: убирает устаревшие PID-файлы и проверяет пробным запросом,
+# что очередь qd отвечает. После двух неудач подряд перезапускает qd.
+# Запускает и останавливает start.sh (вместе с qd).
+
+B=/system/bin/busyboxx
+H=/online/mod/helper
+LOG=/var/log/modhelper.log
+INTERVAL=30
+
+export PATH=/system/bin:/system/xbin:/app/bin:/sbin:/bin
+
+log() { echo "$($B date '+%m-%d %H:%M:%S') wd $*" >> "$LOG"; }
+
+fails=0
+while :; do
+    $B sleep $INTERVAL
+    if $B sh "$H/start.sh" tick > /dev/null 2>&1; then
+        fails=0
+        continue
+    fi
+    fails=$((fails + 1))
+    log "очередь не ответила ($fails)"
+    if [ $fails -ge 2 ]; then
+        log "перезапуск qd"
+        $B sh "$H/start.sh" restart-qd >> "$LOG" 2>&1
+        fails=0
+    fi
+done

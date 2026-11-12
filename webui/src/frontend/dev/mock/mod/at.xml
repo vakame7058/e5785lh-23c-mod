@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response><mode>read</mode><blacklist><cmd>^PHYNUM</cmd><cmd>^NVWR</cmd><cmd>^NVWREX</cmd><cmd>^DATALOCK</cmd><cmd>^GODLOAD</cmd><cmd>^CGSN</cmd></blacklist></response>

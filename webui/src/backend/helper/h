@@ -1,0 +1,3038 @@
+#!/system/bin/busyboxx sh
+# Помощник веб-панели (root). Интерфейс CGI; запускает его очередь qd (см. qd и hc рядом).
+#
+# Запрос:  REQUEST_METHOD=POST, QUERY_STRING="a=<имя>.<действие>&<поле>=<значение>..." (значения в %XX),
+#          stdin: первая строка — секрет из /online/mod/helper/secret, дальше — данные
+#          (для save — base64).
+# Ответ:   строка "S <код>"; при коде 0 дальше XML-фрагмент для <response>;
+#          иначе вторая строка — сообщение, дальше — вывод команды (сырой текст).
+#
+# Действия только из белого списка (функция dispatch ниже).
+
+B=/system/bin/busyboxx
+H=/online/mod/helper
+RUN=/var/modhelper
+LOG=/var/log/modhelper.log
+SLOG=/var/log/modscripts.log
+LOG_MAX=65536
+VER=1
+ATC=/system/xbin/atc
+NVTOOL=/system/xbin/balong-nvtool
+IPT="/system/bin/xtables-multi iptables"
+SCRIPTS=/online/scripts
+PKG=/online/mod/pkg
+VPN_DIR=/online/mod/vpn
+WG_CONF=/online/vpn.conf
+OVPN_CONF=$VPN_DIR/openvpn.conf
+OUT_MAX=65536
+SPEED_URL=http://speedtest.selectel.ru/10MB
+# управляющие символы, недопустимые в XML (busybox tr 1.21 не понимает диапазоны \000-\010: удаляет "-")
+CTRL='\000\001\002\003\004\005\006\007\010\013\014\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037'
+
+export PATH=/system/bin:/system/xbin:/app/bin:/sbin:/bin
+umask 077
+OIFS=$IFS
+
+# speed_samples_xml ЭЛЕМЕНТ РЯД [РЯД] — точки замера в XML. Наблюдатель сам дописывает готовый XML в РЯД.xml:
+# разбор всех точек на каждый показ занимал 0,09 с ЦП на 128 точек и отнимал их у замера.
+speed_samples_xml() {
+    local e=$1
+    shift
+    printf '<%s>' "$e"
+    case "$#" in
+        1) $B cat "$1.xml" 2>/dev/null ;;
+        *) $B cat "$1.xml" "$2.xml" 2>/dev/null ;;
+    esac
+    printf '</%s>' "$e"
+}
+
+# speed_live_xml — показ идущего замера: speed.info, последняя точка текущей фазы, все точки, история
+speed_live_xml() {
+    local t c k m lt="" lc="" lk="" f=$RUN/speed.series
+    $B cat "$RUN/speed.info" 2>/dev/null
+    [ -f "$RUN/speed.cur" ] && read -r f < "$RUN/speed.cur"
+    if [ -f "$f" ]; then
+        # read на конце файла очищает переменные: последнюю строку держим отдельно
+        while read -r t c k m; do lt=$t; lc=$c; lk=$k; done < "$f"
+        if [ -n "$lt" ]; then
+            printf '<elapsed_s>%d.%d</elapsed_s>' $((lt / 1000)) $((lt % 1000 / 100))
+        else
+            printf '<elapsed_s></elapsed_s>'
+        fi
+        printf '<cur_cpu_pct>%s</cur_cpu_pct><cur_kbps>%s</cur_kbps>' "$lc" "$lk"
+    fi
+    speed_samples_xml samples "$RUN/speed.series" "$RUN/speed.series.dm"
+    speed_samples_xml up_samples "$RUN/speed.series.up" "$RUN/speed.series.um"
+    $B cat "$RUN/speed.history.xml" 2>/dev/null
+}
+
+# Показ идущего замера запрашивается раз в секунду. Весь этот файл оболочка разбирает 0,2 с ЦП и отнимает их у замера,
+# поэтому ответ дается до разбора остального. Во всех других случаях дальше идет обычный путь.
+if [ "$QUERY_STRING" = a=speedtest.show ] && [ "$REQUEST_METHOD" = POST ] && [ "$REMOTE_ADDR" = 127.0.0.1 ] \
+    && [ -f "$RUN/speedtest.pid" ] && read -r LIVE_PID < "$RUN/speedtest.pid" && [ -d "/proc/$LIVE_PID" ]; then
+    printf 'Content-Type: text/plain\r\n\r\n'
+    read -r LIVE_IN
+    read -r LIVE_SECRET < "$H/secret"
+    if [ -n "$LIVE_SECRET" ] && [ "$LIVE_IN" = "$LIVE_SECRET" ]; then
+        printf 'S 0\n'
+        speed_live_xml
+    else
+        printf 'S 9002\nДействие запрещено\n'
+    fi
+    exit 0
+fi
+
+# ---------- общие функции ----------
+
+T=$RUN/r.$$
+$B mkdir -p "$RUN" "$T" 2>/dev/null
+cleanup() { $B rm -rf "$T"; }
+
+log() {
+    if [ -f "$LOG" ] && [ "$($B wc -c < "$LOG")" -gt "$LOG_MAX" ]; then
+        $B mv -f "$LOG" "$LOG.1"
+    fi
+    echo "$($B date '+%m-%d %H:%M:%S') $A $*" >> "$LOG"
+}
+
+# fail КОД СООБЩЕНИЕ [ФАЙЛ_С_ВЫВОДОМ] — завершает действие с ошибкой
+fail() {
+    echo "$1" > "$T/err_code"
+    echo "$2" > "$T/err_msg"
+    [ -n "$3" ] && [ -f "$3" ] && $B head -c "$OUT_MAX" "$3" > "$T/err_out"
+    exit 1
+}
+
+# экранирование для XML: результат в XV
+xesc() {
+    XV=$1
+    case "$XV" in
+        *[\&\<\>]*)
+            XV=${XV//&/&amp;}
+            XV=${XV//</&lt;}
+            XV=${XV//>/&gt;}
+            ;;
+    esac
+}
+
+# x ИМЯ ЗНАЧЕНИЕ — элемент <ИМЯ>значение</ИМЯ>
+x() {
+    xesc "$2"
+    printf '<%s>%s</%s>' "$1" "$XV" "$1"
+}
+
+# xfile ИМЯ ФАЙЛ — элемент с содержимым файла (не больше OUT_MAX байт)
+xfile() {
+    printf '<%s>' "$1"
+    $B head -c "$OUT_MAX" "$2" | $B tr -d "$CTRL" \
+        | $B sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+    printf '</%s>' "$1"
+}
+
+is_uint() {
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    [ ${#1} -le 9 ]
+}
+
+is_flag() {
+    case "$1" in 0|1) return 0 ;; esac
+    return 1
+}
+
+flag_on() { [ -f "$H/$1" ]; }
+
+need_modem_write() {
+    flag_on modem_write || fail 9008 "Временно запрещено: команда меняет состояние модема"
+}
+
+need_nv_write() {
+    flag_on nv_write || fail 9008 "Временно запрещено: команда пишет NV"
+}
+
+# at_run КОМАНДА — ответ модема без служебных строк в $T/at
+at_run() {
+    $B flock -x "$RUN/at.lock" $B timeout -t 15 "$ATC" "$1" > "$T/at.raw" 2>&1
+    $B tr -d '\r' < "$T/at.raw" | $B grep -v -e '^Waiting for response' -e '^[[:space:]]*$' > "$T/at"
+}
+
+at_ok() { $B grep -q '^OK' "$T/at"; }
+
+# первая строка ответа с префиксом, без префикса и кавычек
+at_field_line() {
+    $B grep -m1 "^$1" "$T/at" | $B sed -e "s/^$1[: ]*//" -e 's/"//g'
+}
+
+remount_system() {
+    $B mount -o "remount,$1" /system 2>"$T/mnt" || $B mount -o "remount,$1" /dev/block/mtdblock26 /system 2>>"$T/mnt"
+}
+
+# ---------- helper ----------
+
+act_helper_show() {
+    local now start
+    now=$($B cut -d. -f1 /proc/uptime)
+    start=$($B cat "$RUN/started" 2>/dev/null)
+    is_uint "$start" || start=$now
+    x running 1
+    x version "$VER"
+    x uptime_s $((now - start))
+    flag_on modem_write && x modem_write 1 || x modem_write 0
+    flag_on nv_write && x nv_write 1 || x nv_write 0
+}
+
+# helper set: флаги modem_write и nv_write (файлы в $H, root 0644) — включают только действия, которым они
+# и так нужны (radio set, AT без «?», cell set/clear, battery set). Черный список AT действует при любом флаге.
+act_helper_set() {
+    local k v f
+    [ -n "$P_modem_write$P_nv_write" ] || fail 9003 "Нужно поле modem_write или nv_write"
+    for k in modem_write nv_write; do
+        eval "v=\$P_$k"
+        [ -n "$v" ] || continue
+        is_flag "$v" || fail 9003 "Неверное значение: $k"
+    done
+    for k in modem_write nv_write; do
+        eval "v=\$P_$k"
+        [ -n "$v" ] || continue
+        f=$H/$k
+        if [ "$v" = 1 ]; then
+            [ -f "$f" ] || { : > "$f"; $B chmod 644 "$f"; }
+            log "флаг $k включен"
+        else
+            $B rm -f "$f"
+            log "флаг $k выключен"
+        fi
+    done
+    act_helper_show
+}
+
+# ---------- sysinfo ----------
+
+# rf ФАЙЛ — первая строка файла в RV без fork (read встроен в sh)
+rf() {
+    RV=""
+    [ -r "$1" ] && read -r RV < "$1" 2>/dev/null
+    return 0
+}
+
+# cpu_snap — "всего простой" из первой строки /proc/stat (простой = idle + iowait)
+cpu_snap() {
+    local c us ni sy id io irq sirq st rest
+    read -r c us ni sy id io irq sirq st rest < /proc/stat
+    echo "$((us + ni + sy + id + io + irq + sirq + ${st:-0})) $((id + io))"
+}
+
+# cpu_pct_now — занятость ЦП в % по разнице с прошлым снимком $RUN/cpu.prev;
+# снимка нет или он старше 120 с — короткий замер 0,4 с
+cpu_pct_now() {
+    local now pt pi pu ct ci dt
+    rf /proc/uptime; now=${RV%%.*}
+    rf "$RUN/cpu.prev"
+    set -- $RV
+    pt=$1; pi=$2; pu=$3
+    set -- $(cpu_snap)
+    ct=$1; ci=$2
+    dt=$((ct - ${pt:-0}))
+    # снимка нет, он старше 120 с или моложе 0,2 с (20 тиков) — короткий замер
+    if [ -z "$pu" ] || [ $((now - pu)) -gt 120 ] || [ "$dt" -lt 20 ]; then
+        pt=$ct; pi=$ci
+        $B usleep 400000
+        set -- $(cpu_snap)
+        ct=$1; ci=$2
+        dt=$((ct - pt))
+    fi
+    echo "$ct $ci $now" > "$RUN/cpu.prev"
+    [ "$dt" -gt 0 ] || { echo 0; return 0; }
+    echo $(( (100 * (dt - (ci - pi)) + dt / 2) / dt ))
+}
+
+# sensor_c ИМЯ ДЕЛИТЕЛЬ — <sensor><name>ИМЯ</name><c>градусы с одной десятой</c></sensor>
+# (только для каналов из списка в act_sysinfo_show)
+sensor_c() {
+    local v sg=""
+    rf "/sys/class/thermal/temp:$1/val"
+    v=$RV
+    case "$v" in -*) sg=-; v=${v#-} ;; esac
+    case "$v" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$2" = 10 ] || v=$((v * 10))
+    printf '<sensor>'; x name "$1"; x c "$sg$((v / 10)).$((v % 10))"; printf '</sensor>'
+}
+
+act_sysinfo_show() {
+    local up l1 l5 l15 rest k v u total=0 free=0 buf=0 cached=0 avail="" n F
+    rf /proc/uptime; x uptime_s "${RV%%.*}"
+    read l1 l5 l15 rest < /proc/loadavg
+    x load1 "$l1"; x load5 "$l5"; x load15 "$l15"
+    x cpu_pct "$(cpu_pct_now)"
+    F=/sys/devices/system/cpu/cpu0/cpufreq
+    rf $F/scaling_cur_freq; x cpu_mhz "$RV"
+    rf $F/cpuinfo_min_freq; x cpu_min_mhz "$RV"
+    rf $F/cpuinfo_max_freq; x cpu_max_mhz "$RV"
+    while read k v u; do
+        case "$k" in
+            MemTotal:) total=$v ;;
+            MemFree:) free=$v ;;
+            MemAvailable:) avail=$v ;;
+            Buffers:) buf=$v ;;
+            Cached:) cached=$v ;;
+        esac
+    done < /proc/meminfo
+    x mem_total_kb "$total"
+    x mem_free_kb "$free"
+    x mem_cached_kb $((buf + cached))
+    if [ -n "$avail" ]; then
+        x mem_avail_kb "$avail"; x mem_avail_est 0
+    else
+        # в ядре 3.10 нет MemAvailable: оценка = свободно + буферы + кэш
+        avail=$((free + buf + cached))
+        x mem_avail_kb "$avail"; x mem_avail_est 1
+    fi
+    x mem_used_kb $((total - avail))
+    [ "$total" -gt 0 ] && x mem_used_pct $(( (100 * (total - avail) + total / 2) / total ))
+    # Датчики /sys/class/thermal — ТОЛЬКО явный список ниже, без глоба temp:*.
+    # Чтение других каналов нельзя: первое чтение неотображенного канала (xo0_low, xo1, xo1_low)
+    # заставляло ядро перечитать карту HKADC, защита модема видела температуру батареи в десятых
+    # (350 >= 61) и через 30 с выключала роутер. После исправления nvsys эти каналы отвечают EPERM,
+    # но lcd, pa1, xo0_low, xo1, xo1_low и любые другие temp:* не читать.
+    # Единицы проверены сессией прошивки: battery и sim_card1 — градусы (battery = ^CHIPTEMP),
+    # pa0 и xo0 — десятые доли градуса.
+    printf '<sensors>'
+    sensor_c battery 1
+    sensor_c sim_card1 1
+    sensor_c pa0 10
+    sensor_c xo0 10
+    printf '</sensors>'
+    local P=/sys/class/power_supply/battery
+    rf $P/capacity; x bat_percent "$RV"
+    rf $P/temp; x bat_temp_c "$RV"
+    rf $P/status; x bat_status "$RV"
+    rf $P/present; x bat_present "$RV"
+    rf $P/voltage_avg; x bat_voltage_mv "$RV"
+    printf '<disks>'
+    $B df -P -k 2>/dev/null | while read dev size used avail pct mnt; do
+        case "$dev" in /dev/block/*) ;; *) continue ;; esac
+        printf '<disk>'; x mount "$mnt"; x total_kb "$size"; x used_kb "$used"; x free_kb "$avail"; printf '</disk>'
+    done
+    printf '</disks>'
+    # версии не меняются до перезагрузки: кэш в $RUN
+    if [ ! -s "$RUN/versions" ]; then
+        $B timeout -t 5 /app/hijacks/bin/web_hook_client device information 1 1 > "$T/dev" 2>/dev/null
+        {
+            echo "$($B uname -r)"
+            $B sed -n 's:.*<SoftwareVersion>\(.*\)</SoftwareVersion>.*:\1:p' "$T/dev"
+        } > "$RUN/versions"
+    fi
+    { read -r k; read -r v; } < "$RUN/versions"
+    x kernel "$k"
+    x fw_version "$v"
+    if [ -d /app/hijacks ] && [ -f /etc/autorun.d/fix_ttl.sh ]; then x mod_version bay3255; else x mod_version ""; fi
+    x helper_version "$VER"
+}
+
+# ---------- signal ----------
+
+# десятые доли → строка "-12.5"
+tenths() {
+    local v=$1 s=""
+    [ "$v" -lt 0 ] && { s="-"; v=$((-v)); }
+    echo "$s$((v / 10)).$((v % 10))"
+}
+
+act_signal_show() {
+    local mode a b c d
+    printf '<stock>'
+    $B timeout -t 5 /app/hijacks/bin/web_hook_client device signal 1 1 2>/dev/null \
+        | $B tr -d '\r\n' | $B sed -n 's:.*<response>\(.*\)</response>.*:\1:p'
+    printf '</stock>'
+    : > "$T/all"
+    for q in 'AT^HCSQ?' 'AT^HFREQINFO?' 'AT^LWCLASH?' 'AT^CECELLID?'; do
+        at_run "$q"
+        { echo "> $q"; $B cat "$T/at"; } >> "$T/all"
+        case "$q" in
+            'AT^HCSQ?')
+                IFS=, ; set -- $(at_field_line '^HCSQ'); IFS=$OIFS
+                mode=$1; a=$2; b=$3; c=$4; d=$5
+                x hcsq_mode "$mode"
+                case "$mode" in
+                    LTE)
+                        is_uint "$a" && x rssi_dbm $((a - 120)) || x rssi_dbm ""
+                        is_uint "$b" && x rsrp_dbm $((b - 140)) || x rsrp_dbm ""
+                        is_uint "$c" && x sinr_db "$(tenths $((c * 2 - 200)))" || x sinr_db ""
+                        is_uint "$d" && x rsrq_db "$(tenths $((d * 5 - 195)))" || x rsrq_db ""
+                        ;;
+                    WCDMA)
+                        is_uint "$a" && x rssi_dbm $((a - 120)) || x rssi_dbm ""
+                        is_uint "$b" && x rscp_dbm $((b - 120)) || x rscp_dbm ""
+                        is_uint "$c" && x ecio_db "$(tenths $((c * 5 - 320)))" || x ecio_db ""
+                        ;;
+                    GSM)
+                        is_uint "$a" && x rssi_dbm $((a - 120)) || x rssi_dbm ""
+                        ;;
+                esac
+                ;;
+            'AT^HFREQINFO?')
+                IFS=, ; set -- $(at_field_line '^HFREQINFO'); IFS=$OIFS
+                if [ $# -ge 9 ]; then
+                    x band "$3"; x earfcn_dl "$4"; x freq_dl_100khz "$5"
+                    is_uint "$6" && x bw_dl_mhz $(($6 / 1000)) || x bw_dl_mhz ""
+                    x earfcn_ul "$7"; x freq_ul_100khz "$8"
+                    is_uint "$9" && x bw_ul_mhz $(($9 / 1000)) || x bw_ul_mhz ""
+                fi
+                ;;
+            'AT^CECELLID?')
+                IFS=, ; set -- $(at_field_line '^CECELLID'); IFS=$OIFS
+                [ $# -ge 3 ] && x pci "$3"
+                ;;
+        esac
+    done
+    xfile output "$T/all"
+}
+
+# ---------- cell (привязка к соте через NV 53810, как fix_cell.sh мода) ----------
+
+# earfcn_to_band EARFCN → "BAND FDL_LOW_MHZ NOFFS" для диапазонов роутера
+earfcn_to_band() {
+    local n=$1
+    if   [ "$n" -ge 0 ] && [ "$n" -le 599 ]; then echo "1 2110 0"
+    elif [ "$n" -ge 1200 ] && [ "$n" -le 1949 ]; then echo "3 1805 1200"
+    elif [ "$n" -ge 2750 ] && [ "$n" -le 3449 ]; then echo "7 2620 2750"
+    elif [ "$n" -ge 3450 ] && [ "$n" -le 3799 ]; then echo "8 925 3450"
+    elif [ "$n" -ge 6150 ] && [ "$n" -le 6449 ]; then echo "20 791 6150"
+    elif [ "$n" -ge 9210 ] && [ "$n" -le 9659 ]; then echo "28 758 9210"
+    elif [ "$n" -ge 9920 ] && [ "$n" -le 10359 ]; then echo "32 1452 9920"
+    elif [ "$n" -ge 37750 ] && [ "$n" -le 38249 ]; then echo "38 2570 37750"
+    fi
+}
+
+act_cell_show() {
+    local line
+    $B timeout -t 10 "$NVTOOL" -d 53810 > "$T/nv" 2>&1
+    line=$($B grep -m1 '^00000000' "$T/nv")
+    set -- $line
+    # $2 — байт 0 (03 — включено), $6 — диапазон, $10 $11 — PCI, $12 $13 — частота
+    if [ $# -ge 13 ]; then
+        [ "$2" = "00" ] && x enabled 0 || x enabled 1
+        x pci $((0x${11} * 256 + 0x${10}))
+        x band $((0x$6))
+        x freq_dl_100khz $((0x${13} * 256 + 0x${12}))
+    else
+        x enabled ""
+    fi
+    at_run 'AT^CECELLID?'
+    { echo "> NV 53810"; $B cat "$T/nv"; echo "> AT^CECELLID?"; $B cat "$T/at"; } > "$T/all"
+    IFS=, ; set -- $(at_field_line '^CECELLID'); IFS=$OIFS
+    x cur_pci "$3"
+    at_run 'AT^HFREQINFO?'
+    $B cat "$T/at" >> "$T/all"
+    IFS=, ; set -- $(at_field_line '^HFREQINFO'); IFS=$OIFS
+    x cur_band "$3"; x cur_earfcn "$4"; x cur_freq_dl_100khz "$5"
+    xfile output "$T/all"
+}
+
+act_cell_set() {
+    need_nv_write
+    local pci=$P_pci earfcn=$P_earfcn band freq bi
+    if [ -z "$pci" ] && [ -z "$earfcn" ]; then
+        at_run 'AT^CECELLID?'
+        IFS=, ; set -- $(at_field_line '^CECELLID'); IFS=$OIFS
+        pci=$3
+        at_run 'AT^HFREQINFO?'
+        IFS=, ; set -- $(at_field_line '^HFREQINFO'); IFS=$OIFS
+        band=$3; freq=$5
+    else
+        is_uint "$pci" && [ "$pci" -le 503 ] || fail 9003 "Неверное значение: pci"
+        is_uint "$earfcn" || fail 9003 "Неверное значение: earfcn"
+        bi=$(earfcn_to_band "$earfcn")
+        [ -n "$bi" ] || fail 9003 "Неверное значение: earfcn (диапазон не поддерживается)"
+        set -- $bi
+        band=$1; freq=$(($2 * 10 + earfcn - $3))
+    fi
+    is_uint "$pci" && is_uint "$band" && is_uint "$freq" || fail 9004 "Нет данных о текущей соте" "$T/at"
+    $B printf '53810:03:00:00:00:%02x:01:%02x:01:%02x:%02x:%02x:%02x:00:00:00:00' \
+        "$band" "$band" $((pci % 256)) $((pci / 256)) $((freq % 256)) $((freq / 256)) > "$T/param"
+    log "nv 53810 <- $($B cat "$T/param")"
+    $B timeout -t 15 "$NVTOOL" -m "$($B cat "$T/param")" > "$T/out" 2>&1
+    act_cell_show
+    x reboot_needed 1
+}
+
+act_cell_clear() {
+    need_nv_write
+    log "nv 53810 <- 0"
+    $B timeout -t 15 "$NVTOOL" -m 53810:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00 > "$T/out" 2>&1
+    act_cell_show
+    x reboot_needed 1
+}
+
+# ---------- ttl, spe (механизм мода: /etc/fix_ttl, /etc/disable_spe, /etc/autorun.d/fix_ttl.sh) ----------
+
+act_ttl_show() {
+    local v
+    v=$($B cat /etc/fix_ttl 2>/dev/null)
+    is_uint "$v" || v=0
+    [ "$v" -ne 0 ] && x enabled 1 || x enabled 0
+    x value 64
+    $IPT -t mangle -C POSTROUTING -o eth_x -j TTL --ttl-set 64 2>/dev/null && x active 1 || x active 0
+}
+
+act_ttl_set() {
+    is_flag "$P_enable" || fail 9003 "Неверное значение: enable"
+    local v=0
+    [ "$P_enable" = 1 ] && v=64
+    if [ "$($B cat /etc/fix_ttl 2>/dev/null)" != "$v" ]; then
+        remount_system rw || fail 9004 "Не удалось открыть /system на запись" "$T/mnt"
+        echo "$v" > /etc/fix_ttl
+        $B sync
+        remount_system ro
+    fi
+    /system/bin/sh /etc/autorun.d/fix_ttl.sh > "$T/out" 2>&1
+    log "fix_ttl=$v"
+    act_ttl_show
+}
+
+spe_apply() {
+    if [ "$1" = 1 ]; then
+        echo "type=switch switch=off action=set" > /sys/devices/spe_cmd/spe_cmd
+    else
+        echo "type=switch switch=on action=set" > /sys/devices/spe_cmd/spe_cmd
+    fi
+}
+
+act_spe_show() {
+    local v
+    v=$($B cat /etc/disable_spe 2>/dev/null)
+    [ "$v" = 1 ] && x disabled 1 || x disabled 0
+}
+
+act_spe_set() {
+    is_flag "$P_disable" || fail 9003 "Неверное значение: disable"
+    if [ "$($B cat /etc/disable_spe 2>/dev/null)" != "$P_disable" ]; then
+        remount_system rw || fail 9004 "Не удалось открыть /system на запись" "$T/mnt"
+        echo "$P_disable" > /etc/disable_spe
+        $B sync
+        remount_system ro
+    fi
+    spe_apply "$P_disable"
+    log "disable_spe=$P_disable"
+    act_spe_show
+}
+
+# ---------- scripts ----------
+
+check_script_name() {
+    case "$P_name" in
+        ''|.*|*[!A-Za-z0-9_.-]*) fail 9003 "Неверное значение: name" ;;
+        *.sh) ;;
+        *) fail 9003 "Неверное значение: name (нужно окончание .sh)" ;;
+    esac
+    [ ${#P_name} -le 64 ] || fail 9003 "Неверное значение: name (длиннее 64 символов)"
+}
+
+is_autorun() { $B grep -qxF "$1" "$H/autorun.list" 2>/dev/null; }
+
+act_scripts_show() {
+    local f n
+    printf '<scripts>'
+    for f in "$SCRIPTS"/*.sh; do
+        [ -f "$f" ] || continue
+        n=${f##*/}
+        set -- $($B stat -c '%s %Y' "$f")
+        printf '<script>'; x name "$n"; x size "$1"; x mtime "$2"
+        is_autorun "$n" && x autorun 1 || x autorun 0
+        printf '</script>'
+    done
+    printf '</scripts>'
+}
+
+script_log() {
+    {
+        echo "== $($B date '+%m-%d %H:%M:%S') $1 rc=$2"
+        $B tail -n 50 "$3"
+    } >> "$SLOG"
+    [ "$($B wc -c < "$SLOG")" -gt "$LOG_MAX" ] && $B mv -f "$SLOG" "$SLOG.1"
+}
+
+# фоновый запуск: каталог $RUN/job.<N> с файлами out, rc, name
+job_bg() {
+    local j=$RUN/job.$1 to=$2 f=$3
+    shift 3
+    (
+        cd "$SCRIPTS"
+        $B timeout -t "$to" "$f" "$@" < /dev/null > "$j/out" 2>&1
+        echo $? > "$j/rc.tmp"
+        $B mv -f "$j/rc.tmp" "$j/rc"
+        script_log "${f##*/} (фон)" "$($B cat "$j/rc")" "$j/out"
+    ) < /dev/null > /dev/null 2>&1 &
+}
+
+act_scripts_run() {
+    check_script_name
+    local f=$SCRIPTS/$P_name to=$P_timeout_s rc j n
+    [ -f "$f" ] || fail 9006 "Не найдено: $P_name"
+    if [ "$P_bg" = 1 ]; then
+        [ -n "$to" ] || to=600
+        is_uint "$to" && [ "$to" -ge 1 ] && [ "$to" -le 3600 ] || fail 9003 "Неверное значение: timeout_s"
+    else
+        [ -n "$to" ] || to=20
+        is_uint "$to" && [ "$to" -ge 1 ] && [ "$to" -le 60 ] || fail 9003 "Неверное значение: timeout_s"
+    fi
+    case "$P_args" in *[\`\$\;\|\&\<\>\(\)\\]*) fail 9003 "Неверное значение: args (недопустимые символы)" ;; esac
+    [ -x "$f" ] || $B chmod 755 "$f"
+    if [ "$P_bg" = 1 ]; then
+        # старые результаты: оставить последние 10
+        n=$($B ls -d "$RUN"/job.* 2>/dev/null | $B wc -l)
+        if [ "$n" -gt 10 ]; then
+            for j in $($B ls -d "$RUN"/job.* | $B sort -t. -k2 -n | $B head -n $((n - 10))); do $B rm -rf "$j"; done
+        fi
+        j=$($B date +%s)$$
+        $B mkdir -p "$RUN/job.$j"
+        echo "$P_name" > "$RUN/job.$j/name"
+        set -f
+        job_bg "$j" "$to" "$f" $P_args
+        set +f
+        log "run-bg $P_name job=$j"
+        x job "$j"
+        x running 1
+        return 0
+    fi
+    set -f
+    cd "$SCRIPTS" && $B timeout -t "$to" "$f" $P_args < /dev/null > "$T/out" 2>&1
+    rc=$?
+    set +f
+    log "run $P_name rc=$rc"
+    script_log "$P_name" "$rc" "$T/out"
+    x rc "$rc"
+    [ "$rc" = 143 ] && x timeout 1 || x timeout 0
+    xfile output "$T/out"
+}
+
+act_scripts_result() {
+    case "$P_job" in ''|*[!0-9]*) fail 9003 "Неверное значение: job" ;; esac
+    [ ${#P_job} -le 20 ] || fail 9003 "Неверное значение: job"
+    local j=$RUN/job.$P_job
+    [ -d "$j" ] || fail 9006 "Не найдено: задание $P_job"
+    x job "$P_job"
+    x name "$($B cat "$j/name" 2>/dev/null)"
+    if [ -f "$j/rc" ]; then
+        x running 0
+        x rc "$($B cat "$j/rc")"
+    else
+        x running 1
+        x rc ""
+    fi
+    xfile output "$j/out"
+}
+
+act_scripts_read() {
+    check_script_name
+    [ -f "$SCRIPTS/$P_name" ] || fail 9006 "Не найдено: $P_name"
+    x name "$P_name"
+    OUT_MAX=262144 xfile content "$SCRIPTS/$P_name"
+}
+
+act_scripts_save() {
+    check_script_name
+    $B base64 -d < "$T/payload" > "$T/new" 2>"$T/b64err" || fail 9003 "Неверное значение: content_b64" "$T/b64err"
+    [ "$($B wc -c < "$T/new")" -le 131072 ] || fail 9003 "Скрипт больше 128 КБ"
+    $B mkdir -p "$SCRIPTS"
+    $B cp "$T/new" "$SCRIPTS/.$P_name.tmp" && $B chmod 755 "$SCRIPTS/.$P_name.tmp" \
+        && $B mv -f "$SCRIPTS/.$P_name.tmp" "$SCRIPTS/$P_name" || fail 9004 "Не удалось записать скрипт"
+    log "save $P_name $($B wc -c < "$SCRIPTS/$P_name") bytes"
+    x name "$P_name"
+}
+
+act_scripts_delete() {
+    check_script_name
+    [ -f "$SCRIPTS/$P_name" ] || fail 9006 "Не найдено: $P_name"
+    $B rm -f "$SCRIPTS/$P_name"
+    autorun_set "$P_name" 0
+    log "delete $P_name"
+    x name "$P_name"
+}
+
+autorun_set() {
+    $B grep -vxF "$1" "$H/autorun.list" > "$T/al" 2>/dev/null
+    [ "$2" = 1 ] && echo "$1" >> "$T/al"
+    $B cp "$T/al" "$H/autorun.list.tmp" && $B mv -f "$H/autorun.list.tmp" "$H/autorun.list"
+}
+
+act_scripts_autorun() {
+    check_script_name
+    is_flag "$P_enable" || fail 9003 "Неверное значение: enable"
+    [ -f "$SCRIPTS/$P_name" ] || fail 9006 "Не найдено: $P_name"
+    autorun_set "$P_name" "$P_enable"
+    log "autorun $P_name=$P_enable"
+    x name "$P_name"
+    x autorun "$P_enable"
+}
+
+# ---------- at ----------
+
+AT_BLACK='^PHYNUM ^CIMEI +EGMR ^NVWR ^NVWREX ^INFORBU ^SFM ^TMODE ^DATALOCK ^SIMLOCK ^CARDLOCK &F ^RESET ^RSTRIGGER ^RSFW ^NVRESTORE ^NVBACKUP ^NVRST ^FACINFO ^WIMEI ^MEID'
+# команды без "?", которые только читают
+AT_READ_EXEC='I I0 I1 +CGSN +CIMI +CGMI +CGMM +CGMR +GSN +CSQ ^MONSC ^MONNC ^HWVER ^VERSION ^CHIPTEMP ^ICCID ^SYSINFO ^SYSINFOEX'
+
+act_at_show() {
+    flag_on modem_write && x mode full || x mode read
+    printf '<blacklist>'
+    for c in $AT_BLACK; do x cmd "$c"; done
+    printf '</blacklist>'
+}
+
+act_at_send() {
+    local cmd=$P_cmd U rest ok=0 c
+    case "$cmd" in ''|*[!\ -~]*) fail 9003 "Неверное значение: cmd" ;; esac
+    U=$(echo "$cmd" | $B tr 'a-z' 'A-Z' | $B tr -d ' ')
+    case "$U" in AT*) ;; *) fail 9003 "Команда должна начинаться с AT" ;; esac
+    case "$U" in *\;*) fail 9002 "Действие запрещено: несколько команд в одной строке" ;; esac
+    for c in $AT_BLACK; do
+        case "$U" in *"$c"*) log "deny $cmd"; fail 9002 "Действие запрещено: $c" ;; esac
+    done
+    if ! flag_on modem_write; then
+        rest=${U#AT}
+        case "$rest" in
+            '') ok=1 ;;
+            *=\?) rest=${rest%=\?}; ok=2 ;;
+            *\?) rest=${rest%\?}; ok=2 ;;
+        esac
+        if [ $ok = 2 ]; then
+            case "$rest" in
+                [+^%\$]*) case "${rest#?}" in ''|*[!A-Z0-9]*) ok=0 ;; esac ;;
+                *) ok=0 ;;
+            esac
+        elif [ $ok = 0 ]; then
+            for c in $AT_READ_EXEC; do [ "$rest" = "$c" ] && ok=1; done
+        fi
+        # поиск сетей: долгий и рвет связь
+        case "$U" in AT+COPS=\?|AT^NETSCAN*) ok=0 ;; esac
+        [ $ok != 0 ] || { log "deny-ro $cmd"; fail 9008 "Временно запрещено: разрешены только запросы (с ? на конце) и ATI"; }
+    fi
+    log "at $cmd"
+    at_run "$cmd"
+    xfile output "$T/at"
+}
+
+# ---------- wificountry ----------
+
+# адрес роутера в LAN (br0); на 127.0.0.1 веб отвечает 307 на https
+lan_ip() {
+    local a
+    a=$($B ip -4 addr show br0 2>/dev/null | $B sed -n 's/.*inet \([0-9.]*\).*/\1/p' | $B head -n1)
+    echo "${a:-192.168.1.1}"
+}
+
+# nc_hold ФАЙЛ ТАЙМАУТ МЕТКА — отдает запрос и держит stdin nc открытым, пока не появится МЕТКА:
+# busybox nc 1.21 по концу stdin закрывает передачу, и часть серверов тогда обрывает ответ
+nc_hold() {
+    local i=0 lim=$(($2 * 10))
+    $B cat "$1"
+    while [ ! -f "$3" ] && [ $i -lt $lim ]; do $B usleep 100000; i=$((i + 1)); done
+}
+
+# nc_req ИП ПОРТ ФАЙЛ_ЗАПРОСА ТАЙМАУТ — ответ в stdout. Для коротких ответов (веб роутера, DNS):
+# stdin не держим, иначе nc ждет, пока сервер сам закроет соединение (веб роутера держит его 10 с и дольше)
+nc_req() {
+    $B timeout -t "$4" $B nc "$1" "$2" < "$3" 2>/dev/null
+}
+
+# http_get ИП ПОРТ ХОСТ ПУТЬ ТАЙМАУТ — ответ целиком в stdout (busyboxx wget тут нестандартный)
+http_get() {
+    printf 'GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n' "$4" "$3" > "$T/http.req"
+    nc_req "$1" "$2" "$T/http.req" "$5"
+}
+
+# Значения из стокового api/wlan/basic-settings. Как и в lanname: этот запрос пришел через веб,
+# поэтому веб опрашивается в фоне через 1 с, а здесь отдается прошлый результат.
+act_wificountry_show() {
+    local c="" a="" t="" now ip
+    rf /proc/uptime; now=${RV%%.*}
+    [ -f "$RUN/wificountry" ] && read -r c a t < "$RUN/wificountry"
+    x country "$c"; x autocountry "$a"
+    is_uint "$t" && x age_s $((now - t)) || x age_s ""
+    ip=$(lan_ip)
+    (
+        $B sleep 1
+        printf 'GET /api/wlan/basic-settings HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n' "$ip" > "$RUN/wl.req"
+        nc_req "$ip" 80 "$RUN/wl.req" 10 > "$RUN/wl.tmp"
+        c=$($B sed -n 's:.*<WifiCountry>\([^<]*\)</WifiCountry>.*:\1:p' "$RUN/wl.tmp")
+        a=$($B sed -n 's:.*<wifiautocountryswitch>\([^<]*\)</wifiautocountryswitch>.*:\1:p' "$RUN/wl.tmp")
+        rf /proc/uptime
+        [ -n "$c" ] && echo "$c ${a:-0} ${RV%%.*}" > "$RUN/wificountry"
+        $B rm -f "$RUN/wl.tmp" "$RUN/wl.req"
+    ) < /dev/null > /dev/null 2>&1 &
+}
+
+act_wificountry_set() {
+    case "$P_country" in [A-Z][A-Z]) ;; *) fail 9003 "Неверное значение: country" ;; esac
+    fail 9002 "Смена страны через помощника не сделана: используйте стоковый api/wlan/basic-settings (WifiCountry)"
+}
+
+# ---------- lanname: проверка имени роутера ----------
+
+# что отвечает DNS роутера на имя и пускает ли веб с заголовком Host: имя
+act_lanname_resolve() {
+    local n=$P_name ip lip wn="" wc="" wt="" now
+    case "$n" in ''|.*|*[!a-z0-9.-]*) fail 9003 "Неверное значение: name" ;; esac
+    lip=$(lan_ip)
+    ip=$(dns_a "$n" 127.0.0.1)
+    x lan_ip "$lip"
+    x dns_ip "$ip"
+    [ "$ip" = "$lip" ] && x dns_ok 1 || x dns_ok 0
+    dns_has "$n" 127.0.0.1 1 "$lip" && x dns_edns_ok 1 || x dns_edns_ok 0
+    # Веб однопоточный, а этот запрос сам пришел через веб: GET к вебу отсюда ждал бы конца
+    # текущего запроса и падал по таймауту. Поэтому веб проверяется в фоне через 1 с после ответа
+    # (GET / на адрес LAN с Host: имя; успех — 200, уход 307 на 192.168.1.1 — нет),
+    # а здесь отдается результат прошлой проверки этого имени.
+    rf /proc/uptime; now=${RV%%.*}
+    [ -f "$RUN/lanname.web" ] && read -r wn wc wt < "$RUN/lanname.web"
+    if [ "$wn" = "$n" ] && is_uint "$wt"; then
+        x web_status "$wc"
+        [ "$wc" = 200 ] && x web_ok 1 || x web_ok 0
+        x web_age_s $((now - wt))
+    else
+        x web_status ""; x web_ok ""; x web_age_s ""
+    fi
+    (
+        $B sleep 1
+        printf 'GET / HTTP/1.0\r\nHost: %s\r\n\r\n' "$n" > "$RUN/lanname.req"
+        wc=$(nc_req "$lip" 80 "$RUN/lanname.req" 5 | $B head -n1 | $B sed -n 's:^HTTP/1\.[01] \([0-9]*\).*:\1:p')
+        rf /proc/uptime
+        echo "$n ${wc:-нет} ${RV%%.*}" > "$RUN/lanname.web.tmp"
+        $B mv -f "$RUN/lanname.web.tmp" "$RUN/lanname.web"
+        $B rm -f "$RUN/lanname.req"
+    ) < /dev/null > /dev/null 2>&1 &
+}
+
+# ---------- msisdn: номер SIM ----------
+# SIM номер не хранит (+CNUM → +CME ERROR: 22, Msisdn в device/information пуст), поэтому номер
+# берется из кэша, введен вручную или узнан запросом USSD у оператора.
+# Кэш — формат зафиксирован (его читает меню экрана): /online/mod/conf/msisdn,
+# одна строка "<ICCID> <номер>\n", номер вида +7XXXXXXXXXX, root:1000 0644.
+MSISDN_CACHE=${MSISDN_CACHE:-/online/mod/conf/msisdn}
+MSISDN_SRC=${MSISDN_SRC:-/online/mod/conf/msisdn.src}
+MSISDN_STATE=${MSISDN_STATE:-/online/mod/conf/msisdn.state}
+USSD_TABLE=${USSD_TABLE:-$H/ussd-msisdn.txt}
+WHC=/app/hijacks/bin/web_hook_client
+
+# xml_field ФАЙЛ ИМЯ — значение <ИМЯ>…</ИМЯ>
+xml_field() { $B sed -n "s:.*<$2>\([^<]*\)</$2>.*:\1:p" "$1" | $B head -n1; }
+
+# sim_info ВРЕМЕННЫЙ_КАТАЛОГ — SIM_ICCID SIM_IMSI SIM_MSISDN SIM_PLMN NET_ROAM NET_SIM NET_SRV
+# (ICCID и IMSI — от стокового device/information через web_hook, клиенту не доверяем)
+sim_info() {
+    $B timeout -t 5 $WHC device information 1 1 > "$1/di" 2>/dev/null
+    SIM_ICCID=$(xml_field "$1/di" Iccid); SIM_ICCID=$(echo "$SIM_ICCID" | $B tr -cd '0-9A-Fa-f')
+    SIM_IMSI=$(xml_field "$1/di" Imsi); SIM_IMSI=$(echo "$SIM_IMSI" | $B tr -cd '0-9')
+    SIM_MSISDN=$(xml_field "$1/di" Msisdn)
+    # MCC + MNC из 2 цифр (так у операторов России, MCC 250)
+    SIM_PLMN=${SIM_IMSI:0:5}
+    $B timeout -t 5 $WHC monitoring status 1 1 > "$1/ms" 2>/dev/null
+    NET_ROAM=$(xml_field "$1/ms" RoamingStatus)
+    NET_SIM=$(xml_field "$1/ms" SimStatus)
+    NET_SRV=$(xml_field "$1/ms" ServiceStatus)
+}
+
+# ussd_lookup PLMN — USSD_CODE, USSD_VERIFIED (1 — код подтвержден на сайте оператора)
+ussd_lookup() {
+    local l
+    USSD_CODE=""; USSD_VERIFIED=0; USSD_SENDERS=""
+    [ -n "$1" ] && [ -f "$USSD_TABLE" ] || return 1
+    l=$($B grep -m1 "^$1|" "$USSD_TABLE" | $B tr -d '\r')
+    [ -n "$l" ] || return 1
+    IFS='|'; set -f; set -- $l; set +f; IFS=$OIFS
+    case "$2" in ''|*[!0-9*#]*) return 1 ;; esac
+    USSD_CODE=$2
+    case "$3" in официально*) USSD_VERIFIED=1 ;; esac
+    USSD_SENDERS=$5
+    return 0
+}
+
+# msisdn_norm СТРОКА — номер вида +7XXXXXXXXXX (8… и 7… → +7…, 10 цифр → +7…), 10–15 цифр
+msisdn_norm() {
+    local s=$1 d
+    case "$s" in *[!0-9+\ \(\)-]*|'') return 1 ;; esac
+    d=$(echo "$s" | $B tr -cd '0-9')
+    case "${#d}" in
+        10) echo "+7$d"; return 0 ;;
+        11) case "$d" in 8*|7*) echo "+7${d#?}"; return 0 ;; esac ;;
+    esac
+    [ ${#d} -ge 10 ] && [ ${#d} -le 15 ] || return 1
+    case "$s" in +*) echo "+$d"; return 0 ;; esac
+    return 1
+}
+
+# msisdn_extract ФАЙЛ — номер из текста ответа оператора (+7…, 8…, с пробелами, дефисами, скобками)
+msisdn_extract() {
+    local n v first=""
+    for n in $($B tr '\n\r\t' '   ' < "$1" \
+        | $B sed -e ':a' -e 's/\([0-9]\)[ ()-]\{1,2\}\([0-9(]\)/\1\2/' -e 'ta' -e 's/(//g' \
+        | $B grep -o -E '\+?[0-9]{10,15}'); do
+        v=$(msisdn_norm "$n") || continue
+        # российский номер — сразу; иначе запомнить первый подходящий
+        case "$v" in +7??????????) echo "$v"; return 0 ;; esac
+        [ -n "$first" ] || first=$v
+    done
+    [ -n "$first" ] && { echo "$first"; return 0; }
+    return 1
+}
+
+cache_read() {
+    CACHE_ICCID=""; CACHE_NUM=""; CACHE_SRC=""
+    [ -f "$MSISDN_CACHE" ] && read -r CACHE_ICCID CACHE_NUM < "$MSISDN_CACHE"
+    local i s
+    [ -f "$MSISDN_SRC" ] && read -r i s < "$MSISDN_SRC" && [ "$i" = "$CACHE_ICCID" ] && CACHE_SRC=$s
+    [ -n "$CACHE_SRC" ] || CACHE_SRC=cache
+}
+
+# cache_write ICCID НОМЕР ИСТОЧНИК — атомарно (tmp + mv), root:1000 0644
+cache_write() {
+    local d=${MSISDN_CACHE%/*}
+    $B mkdir -p "$d" && $B chmod 755 "$d"
+    printf '%s %s\n' "$1" "$2" > "$MSISDN_CACHE.tmp" || return 1
+    $B chown 0:1000 "$MSISDN_CACHE.tmp"; $B chmod 644 "$MSISDN_CACHE.tmp"
+    $B mv -f "$MSISDN_CACHE.tmp" "$MSISDN_CACHE" || return 1
+    printf '%s %s\n' "$1" "$3" > "$MSISDN_SRC.tmp" && $B chmod 644 "$MSISDN_SRC.tmp" && $B mv -f "$MSISDN_SRC.tmp" "$MSISDN_SRC"
+}
+
+# Состояние запросов номера для SIM (переживает перезагрузку), файл msisdn.state, одна строка:
+#   <ICCID> <попыток автозапроса> <итог: none|sent|ok|sms|error> <unix отправки> <дата> <время отправки>
+# Время отправки — по часам роутера, как Date в списке SMS: SMS оператора берутся не раньше него.
+state_read() {
+    local i a r t d tm
+    ST_ATT=0; ST_RES=none; ST_AT=""; ST_LOCAL=""
+    [ -f "$MSISDN_STATE" ] || return 1
+    read -r i a r t d tm < "$MSISDN_STATE"
+    [ -n "$1" ] && [ "$i" = "$1" ] || return 1
+    is_uint "$a" && ST_ATT=$a
+    [ -n "$r" ] && ST_RES=$r
+    case "$t" in ''|*[!0-9]*) ;; *) ST_AT=$t ;; esac
+    [ -n "$d" ] && [ "$d" != - ] && [ -n "$tm" ] && ST_LOCAL="$d $tm"
+    return 0
+}
+
+# state_write ICCID ПОПЫТОК ИТОГ [UNIX "ДАТА ВРЕМЯ"]
+state_write() {
+    printf '%s %s %s %s %s\n' "$1" "$2" "$3" "${4:--}" "${5:-- -}" > "$MSISDN_STATE.tmp" \
+        && $B chmod 644 "$MSISDN_STATE.tmp" && $B mv -f "$MSISDN_STATE.tmp" "$MSISDN_STATE"
+}
+
+state_attempts() { state_read "$1"; echo "$ST_ATT"; }
+
+# Чтение SMS оператора — через sms_webhook (если он поставлен).
+# Условия приватности: смотреть только 5 новых входящих; текст разбирать только у SMS от отправителя
+# оператора (5-е поле ussd-msisdn.txt) и пришедших не раньше отправки USSD; ничего не помечать
+# прочитанным (sms-list пометку не ставит) и не писать текст в журнал.
+SMS_CLIENT=${SMS_CLIENT:-/app/hijacks/bin/sms_webhook_client}
+
+# sms_find ОТПРАВИТЕЛИ "ДАТА ВРЕМЯ" КАТАЛОГ — номер из подходящего SMS; код 3 — пути к SMS нет
+sms_find() {
+    local senders=$1 since=$2 d=$3 m ph dt c lo
+    [ -x "$SMS_CLIENT" ] && [ -n "$senders" ] && [ -n "$since" ] || return 3
+    $B timeout -t 15 "$SMS_CLIENT" sms sms-list 2 '<?xml version="1.0" encoding="UTF-8"?><request><PageIndex>1</PageIndex><ReadCount>5</ReadCount><BoxType>1</BoxType><SortType>0</SortType><Ascending>0</Ascending><UnreadPreferred>0</UnreadPreferred></request>' \
+        2>/dev/null | $B tr -d '\r\n' | $B sed 's:</Message>:</Message>\n:g' > "$d/sms.l"
+    senders=",$(echo "$senders" | $B tr 'A-Z' 'a-z' | $B tr -d ' '),"
+    while read -r m; do
+        ph=$(echo "$m" | $B sed -n 's:.*<Phone>\([^<]*\)</Phone>.*:\1:p' | $B tr 'A-Z' 'a-z')
+        [ -n "$ph" ] || continue
+        case "$senders" in *",$ph,"*) ;; *) continue ;; esac
+        dt=$(echo "$m" | $B sed -n 's:.*<Date>\([^<]*\)</Date>.*:\1:p')
+        # дата SMS не раньше отправки: строки "ГГГГ-ММ-ДД ЧЧ:ММ:СС" сравниваются как текст
+        lo=$(printf '%s\n%s\n' "$dt" "$since" | $B sort | $B head -n1)
+        [ "$lo" = "$since" ] || continue
+        echo "$m" | $B sed -n 's:.*<Content>\(.*\)</Content>.*:\1:p' \
+            | $B sed -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&amp;/\&/g' > "$d/sms.t"
+        if c=$(msisdn_extract "$d/sms.t"); then
+            $B rm -f "$d/sms.l" "$d/sms.t"
+            echo "$c"
+            return 0
+        fi
+    done < "$d/sms.l"
+    $B rm -f "$d/sms.l" "$d/sms.t"
+    return 1
+}
+
+# gsm7_pack КОД — код USSD (* # 0-9) упакован в 7 бит, hex (для ^USSDMODE: 1)
+gsm7_pack() {
+    local s=$1 acc=0 nb=0 i=0 c out=""
+    while [ $i -lt ${#s} ]; do
+        case "${s:$i:1}" in
+            '*') c=42 ;;
+            '#') c=35 ;;
+            [0-9]) c=$((48 + ${s:$i:1})) ;;
+            *) return 1 ;;
+        esac
+        acc=$((acc | (c << nb))); nb=$((nb + 7))
+        while [ $nb -ge 8 ]; do out="$out$(printf %02X $((acc & 255)))"; acc=$((acc >> 8)); nb=$((nb - 8)); done
+        i=$((i + 1))
+    done
+    [ $nb -gt 0 ] && out="$out$(printf %02X $((acc & 255)))"
+    echo "$out"
+}
+
+# gch КОД_СИМВОЛА — в CH: цифры, + - ( ) как есть, остальное пробел (для номера больше не нужно)
+gch() {
+    case "$1" in
+        48) CH=0 ;; 49) CH=1 ;; 50) CH=2 ;; 51) CH=3 ;; 52) CH=4 ;;
+        53) CH=5 ;; 54) CH=6 ;; 55) CH=7 ;; 56) CH=8 ;; 57) CH=9 ;;
+        43) CH=+ ;; 45) CH=- ;; 40) CH='(' ;; 41) CH=')' ;;
+        *) CH=' ' ;;
+    esac
+}
+
+# ussd_decode HEX DCS — текст ответа в прозрачном режиме (только цифры и знаки номера)
+ussd_decode() {
+    local h=$1 dcs=${2:-15} alph=0 i=0 n=${#1} b acc=0 nb=0 out=""
+    case "$h" in *[!0-9A-Fa-f]*) echo "$h"; return 0 ;; esac
+    # алфавит по DCS (3GPP 23.038): 0 — 7 бит, 1 — 8 бит, 2 — UCS2
+    case $((dcs >> 4)) in
+        4|5|6|7) alph=$(((dcs >> 2) & 3)) ;;
+        1) [ "$dcs" = 17 ] && { alph=2; i=4; } ;;
+        15) alph=$(((dcs >> 2) & 1)) ;;
+    esac
+    if [ $alph = 2 ]; then
+        while [ $i -lt $n ]; do
+            if [ "${h:$i:2}" = 00 ]; then gch $((0x${h:$((i + 2)):2})); else CH=' '; fi
+            out="$out$CH"; i=$((i + 4))
+        done
+    elif [ $alph = 1 ]; then
+        while [ $i -lt $n ]; do gch $((0x${h:$i:2})); out="$out$CH"; i=$((i + 2)); done
+    else
+        while [ $i -lt $n ]; do
+            b=$((0x${h:$i:2})); i=$((i + 2))
+            acc=$((acc | (b << nb))); nb=$((nb + 8))
+            while [ $nb -ge 7 ]; do gch $((acc & 127)); out="$out$CH"; acc=$((acc >> 7)); nb=$((nb - 7)); done
+        done
+    fi
+    echo "$out"
+}
+
+# ussd_query КОД КАТАЛОГ — запрос USSD через /dev/appvcom1; ответ оператора в КАТАЛОГ/reply,
+# номер (если найден) — в stdout. Порт держим под тем же локом, что и atc.
+ussd_query() {
+    local code=$1 d=$2 mode arg pid i l st str dcs pn
+    $B rm -f "$d/urc" "$d/reply"
+    # проверка без отправки: USSD_FAKE — файл с «ответом оператора»
+    if [ -n "$USSD_FAKE" ]; then
+        $B sleep 1
+        [ -s "$USSD_FAKE" ] || return 1
+        $B cp "$USSD_FAKE" "$d/reply"
+        msisdn_extract "$d/reply"
+        return $?
+    fi
+    exec 8> "$RUN/at.lock"
+    $B flock -x 8
+    $B timeout -t 10 "$ATC" 'AT^USSDMODE?' 2>/dev/null | $B tr -d '\r' > "$d/mode"
+    mode=$($B sed -n 's/^\^USSDMODE: *\([0-9]\).*/\1/p' "$d/mode")
+    # AT+CUSD=1 включает показ ответов (+CUSD: n); после запроса вернем, как было
+    pn=$($B timeout -t 10 "$ATC" 'AT+CUSD?' 2>/dev/null | $B tr -d '\r' | $B sed -n 's/^+CUSD: *\([0-9]\).*/\1/p')
+    if [ "$mode" = 1 ]; then arg=$(gsm7_pack "$code") || { $B flock -u 8; return 1; }; else arg=$code; fi
+    $B cat /dev/appvcom1 > "$d/urc" 2>/dev/null &
+    pid=$!
+    $B usleep 300000
+    printf 'AT+CUSD=1,"%s",15\r' "$arg" > /dev/appvcom1
+    i=0
+    while [ $i -lt 30 ]; do
+        $B sleep 1; i=$((i + 1))
+        $B grep -q '+CUSD:' "$d/urc" && break
+        $B grep -q -e 'ERROR' "$d/urc" && break
+    done
+    $B sleep 1
+    l=$($B tr -d '\r' < "$d/urc" | $B grep -m1 '+CUSD:')
+    st=$(echo "$l" | $B sed -n 's/^+CUSD: *\([0-9]\).*/\1/p')
+    # сеанс ждет ответа абонента — закрыть
+    [ "$st" = 1 ] && printf 'AT+CUSD=2\r' > /dev/appvcom1 && $B sleep 1
+    kill "$pid" 2>/dev/null
+    [ "$pn" = 0 ] && $B timeout -t 10 "$ATC" 'AT+CUSD=0' > /dev/null 2>&1
+    $B flock -u 8
+    [ -n "$l" ] || { echo "нет +CUSD" > "$d/meta"; return 1; }
+    str=$(echo "$l" | $B sed -n 's/^+CUSD: *[0-9]*, *"\([^"]*\)".*/\1/p')
+    dcs=$(echo "$l" | $B sed -n 's/^+CUSD: *[0-9]*, *"[^"]*", *\([0-9]*\).*/\1/p')
+    # для журнала — только тип ответа, без текста
+    echo "+CUSD: $st, DCS $dcs, длина ${#str}" > "$d/meta"
+    if [ "$mode" = 1 ]; then ussd_decode "$str" "$dcs" > "$d/reply"; else echo "$str" > "$d/reply"; fi
+    msisdn_extract "$d/reply"
+}
+
+# mypid — PID текущей подоболочки (в ash $$ в ( … ) — PID родителя)
+mypid() { $B sh -c 'echo $PPID'; }
+
+# ussd_busy — идет запрос USSD помощника (ручной или автоматический)
+ussd_busy() {
+    local p
+    p=$($B cat "$RUN/ussd.pid" 2>/dev/null)
+    is_uint "$p" && [ -d "/proc/$p" ] && return 0
+    $B rm -f "$RUN/ussd.pid"
+    return 1
+}
+
+# auto_set СОСТОЯНИЕ [СЕКУНД_ДО_ПОПЫТКИ] — для show
+auto_set() {
+    local now
+    rf /proc/uptime; now=${RV%%.*}
+    echo "$1 $((now + ${2:-0}))" > "$RUN/msisdn.auto"
+}
+
+act_msisdn_show() {
+    local st nt now a b
+    sim_info "$T"
+    cache_read
+    x iccid "$SIM_ICCID"
+    x plmn "$SIM_PLMN"
+    ussd_lookup "$SIM_PLMN"
+    x ussd_code "$USSD_CODE"
+    x ussd_verified "$USSD_VERIFIED"
+    x ussd_senders "$USSD_SENDERS"
+    state_read "$SIM_ICCID"
+    x ussd_sent_at "$ST_AT"; x ussd_sent_local "$ST_LOCAL"
+    x last_result "$ST_RES"
+    [ -x "$SMS_CLIENT" ] && x sms_reader 1 || x sms_reader 0
+    [ "$NET_ROAM" = 1 ] && x roaming 1 || x roaming 0
+    if [ -n "$SIM_ICCID" ] && [ "$CACHE_ICCID" = "$SIM_ICCID" ]; then x cache_iccid_match 1; else x cache_iccid_match 0; fi
+    if [ -n "$SIM_MSISDN" ] && n=$(msisdn_norm "$SIM_MSISDN"); then
+        x number "$n"; x source sim
+    elif [ -n "$SIM_ICCID" ] && [ "$CACHE_ICCID" = "$SIM_ICCID" ] && [ -n "$CACHE_NUM" ]; then
+        x number "$CACHE_NUM"; x source "$CACHE_SRC"
+    else
+        x number ""; x source none
+    fi
+    # автозапрос: состояние из ОЗУ, попытки — из файла
+    st=idle; nt=0
+    if [ -f "$RUN/msisdn.auto" ]; then
+        read -r st nt < "$RUN/msisdn.auto"
+        rf /proc/uptime; now=${RV%%.*}
+        nt=$((nt - now)); [ "$nt" -gt 0 ] || nt=0
+    fi
+    [ -z "$USSD_CODE" ] && [ "$st" = idle ] && st=no_code
+    [ "$st" = idle ] && [ "$ST_RES" = sms ] && st=sms
+    ussd_busy && [ -f "$RUN/msisdn.query" ] && st=busy
+    x auto_state "$st"
+    x attempts "$ST_ATT"
+    x next_try_s "$nt"
+    if [ -f "$RUN/msisdn.query" ]; then
+        read -r st < "$RUN/msisdn.query"
+        x query_state "$st"
+    else
+        x query_state idle
+    fi
+    [ -s "$RUN/msisdn.reply" ] && xfile last_reply "$RUN/msisdn.reply"
+}
+
+act_msisdn_set() {
+    local n
+    n=$(msisdn_norm "$P_number") || fail 9003 "Неверное значение: number (нужно 10–15 цифр, например +7 900 000-00-00)"
+    case "$P_source" in ''|manual) P_source=manual ;; ussd) ;; *) fail 9003 "Неверное значение: source (manual или ussd)" ;; esac
+    sim_info "$T"
+    [ -n "$SIM_ICCID" ] || fail 9004 "Нет ICCID: SIM не готова"
+    cache_write "$SIM_ICCID" "$n" "$P_source" || fail 9004 "Не удалось записать $MSISDN_CACHE"
+    log "msisdn set $P_source $n"
+    act_msisdn_show
+}
+
+act_msisdn_parse() {
+    local n
+    $B base64 -d < "$T/payload" > "$T/text" 2>/dev/null || fail 9003 "Неверное значение: text_b64"
+    if n=$(msisdn_extract "$T/text"); then x number "$n"; x found 1; else x number ""; x found 0; fi
+}
+
+# msisdn_try ICCID КОД — одна попытка (USSD_SENDERS уже из ussd_lookup).
+# Код 0 — номер найден и записан; 2 — оператор ответил без номера (номер придет в SMS);
+# 1 — ошибка. При ответе без номера и пути к SMS ждет SMS оператора до 120 с.
+msisdn_try() {
+    local d n at lt rc=1 i r
+    d=$RUN/ms.$(mypid)
+    $B mkdir -p "$d"
+    mypid > "$RUN/ussd.pid"
+    at=$($B date +%s); lt=$($B date '+%Y-%m-%d %H:%M:%S')
+    state_read "$1"; state_write "$1" "$ST_ATT" sent "$at" "$lt"
+    if n=$(ussd_query "$2" "$d") && [ -n "$n" ]; then
+        cache_write "$1" "$n" ussd
+        log "msisdn ussd: номер найден"
+        rc=0
+    elif [ -s "$d/reply" ]; then
+        [ -f "$d/meta" ] && log "msisdn ussd $($B cat "$d/meta")"
+        log "msisdn ussd: ответ без номера"
+        rc=2
+        if [ -x "$SMS_CLIENT" ] && [ -n "$USSD_SENDERS" ]; then
+            i=0
+            while [ $i -lt 12 ]; do
+                $B sleep 10; i=$((i + 1))
+                if n=$(sms_find "$USSD_SENDERS" "$lt" "$d"); then
+                    cache_write "$1" "$n" ussd
+                    log "msisdn sms: номер найден"
+                    rc=0
+                    break
+                fi
+            done
+            [ $rc = 0 ] || log "msisdn sms: номер не найден за 120 с"
+        fi
+    else
+        [ -f "$d/meta" ] && log "msisdn ussd $($B cat "$d/meta")"
+        log "msisdn ussd: ошибка"
+    fi
+    $B cp "$d/reply" "$RUN/msisdn.reply" 2>/dev/null
+    case $rc in 0) r=ok ;; 2) r=sms ;; *) r=error ;; esac
+    state_read "$1"; state_write "$1" "$ST_ATT" "$r" "$at" "$lt"
+    $B rm -rf "$d" "$RUN/ussd.pid"
+    return $rc
+}
+
+# найти номер в SMS оператора, пришедшем после последней отправки USSD для этой SIM (без нового USSD)
+act_msisdn_sms() {
+    local n
+    [ -x "$SMS_CLIENT" ] || fail 9006 "Не найдено: чтение SMS от помощника (sms_webhook) не установлено"
+    sim_info "$T"
+    [ -n "$SIM_ICCID" ] || fail 9004 "Нет ICCID: SIM не готова"
+    ussd_lookup "$SIM_PLMN"
+    [ -n "$USSD_SENDERS" ] || fail 9006 "Не найдено: отправители SMS для оператора $SIM_PLMN (ussd-msisdn.txt)"
+    state_read "$SIM_ICCID"
+    [ -n "$ST_LOCAL" ] || fail 9006 "Не найдено: USSD для этой SIM не отправлялся"
+    if n=$(sms_find "$USSD_SENDERS" "$ST_LOCAL" "$T"); then
+        cache_write "$SIM_ICCID" "$n" ussd
+        state_write "$SIM_ICCID" "$ST_ATT" ok "$ST_AT" "$ST_LOCAL"
+        log "msisdn sms: номер найден"
+        x found 1
+    else
+        log "msisdn sms: номер не найден"
+        x found 0
+    fi
+    act_msisdn_show
+}
+
+# ручной запрос (кнопка «Узнать у оператора»): в фоне, одна попытка, лимит автозапроса не тратит
+act_msisdn_query() {
+    sim_info "$T"
+    [ -n "$SIM_ICCID" ] || fail 9004 "Нет ICCID: SIM не готова"
+    [ "$NET_SIM" = 1 ] && [ "$NET_SRV" = 2 ] || fail 9002 "Нет сети: запрос к оператору невозможен"
+    [ "$NET_ROAM" = 1 ] && fail 9002 "Роуминг: запрос USSD может быть платным"
+    ussd_lookup "$SIM_PLMN" || fail 9006 "Не найдено: код USSD для оператора $SIM_PLMN (файл ussd-msisdn.txt)"
+    ussd_busy && fail 9002 "Запрос к оператору уже идет"
+    echo pending > "$RUN/msisdn.query"
+    $B rm -f "$RUN/msisdn.reply"
+    (
+        msisdn_try "$SIM_ICCID" "$USSD_CODE"
+        case $? in
+            0) echo done > "$RUN/msisdn.query" ;;
+            2) echo sms > "$RUN/msisdn.query" ;;
+            *) echo failed > "$RUN/msisdn.query" ;;
+        esac
+    ) < /dev/null > /dev/null 2>&1 &
+    # PID сразу: второй запрос, пришедший до старта фона, тоже увидит занятость
+    echo $! > "$RUN/ussd.pid"
+    log "msisdn query $USSD_CODE"
+    x query_state pending
+    x ussd_code "$USSD_CODE"
+}
+
+# автозапрос после загрузки: ждать домашнюю сеть до 10 мин, один раз сверить ICCID, при нужде — USSD;
+# неудача — повторы через 1, 10, 60 мин, всего не больше 3 на ICCID (счетчик в msisdn.state)
+msisdn_auto_job() {
+    local d w=0 a delay n
+    d=$RUN/msa.$(mypid)
+    $B mkdir -p "$d"
+    mypid > "$RUN/msisdn-auto.pid"
+    auto_set waiting_net
+    while :; do
+        sim_info "$d"
+        [ "$NET_SIM" = 1 ] && [ "$NET_SRV" = 2 ] && break
+        [ $w -ge 600 ] && { auto_set no_network; $B rm -rf "$d" "$RUN/msisdn-auto.pid"; return 0; }
+        $B sleep 15; w=$((w + 15))
+    done
+    cache_read
+    if [ -n "$SIM_MSISDN" ] || { [ "$CACHE_ICCID" = "$SIM_ICCID" ] && [ -n "$CACHE_NUM" ]; }; then
+        auto_set done
+    elif [ "$NET_ROAM" = 1 ]; then
+        auto_set roaming
+    elif ! ussd_lookup "$SIM_PLMN"; then
+        auto_set no_code
+    elif [ "$USSD_VERIFIED" != 1 ]; then
+        auto_set unverified
+    else
+        state_read "$SIM_ICCID"
+        # прошлый ответ был «номер в SMS» — нового USSD не слать, а поискать SMS (если путь есть)
+        if [ "$ST_RES" = sms ]; then
+            if n=$(sms_find "$USSD_SENDERS" "$ST_LOCAL" "$d"); then
+                cache_write "$SIM_ICCID" "$n" ussd
+                state_write "$SIM_ICCID" "$ST_ATT" ok "$ST_AT" "$ST_LOCAL"
+                log "msisdn sms: номер найден"
+                auto_set done
+            else
+                auto_set sms
+            fi
+            $B rm -rf "$d" "$RUN/msisdn-auto.pid"
+            return 0
+        fi
+        for delay in ${MSISDN_DELAYS:-60 600 3600}; do
+            state_read "$SIM_ICCID"; a=$ST_ATT
+            [ "$a" -ge 3 ] && { auto_set failed; break; }
+            auto_set pending "$delay"
+            $B sleep "$delay"
+            while ussd_busy; do $B sleep 10; done
+            sim_info "$d"
+            [ "$NET_ROAM" = 1 ] && { auto_set roaming; break; }
+            state_read "$SIM_ICCID"; state_write "$SIM_ICCID" $((a + 1)) "$ST_RES" "$ST_AT" "$ST_LOCAL"
+            msisdn_try "$SIM_ICCID" "$USSD_CODE"
+            case $? in
+                0) auto_set done; break ;;
+                2) auto_set sms; break ;;
+            esac
+            auto_set failed
+        done
+    fi
+    $B rm -rf "$d" "$RUN/msisdn-auto.pid"
+}
+
+act_msisdn_auto() {
+    local p
+    p=$($B cat "$RUN/msisdn-auto.pid" 2>/dev/null)
+    is_uint "$p" && [ -d "/proc/$p" ] && { x auto_state running; return 0; }
+    ( msisdn_auto_job ) < /dev/null > /dev/null 2>&1 &
+    echo $! > "$RUN/msisdn-auto.pid"
+    log "msisdn auto start"
+    x auto_state started
+}
+
+# ---------- speedtest ----------
+
+# Замер скорости. Список серверов — /online/mod/helper/speedtest-servers.txt:
+#   id|название|страна|url|размер_байт|range|https|медиана_Мбит/с   (# — комментарий)
+# Качает curl из пакета dns (HTTP и HTTPS, имена сам спрашивает у DNS роутера 127.0.0.1);
+# без curl — только http:// через nc. Во время замера фоновый сэмплер раз в 1 с пишет
+# занятость ЦП и скорость приема на интерфейсе маршрута по умолчанию.
+CURL=${CURL:-/online/mod/pkg/dns/bin/curl}
+CACERT=/online/mod/pkg/dns/cacert.pem
+SPEED_LIST=${SPEED_LIST:-$H/speedtest-servers.txt}
+SPEED_DEFAULT="selectel|Selectel|RU|$SPEED_URL|10485834|1|0|"
+
+speed_running() {
+    local p
+    p=$($B cat "$RUN/speedtest.pid" 2>/dev/null)
+    is_uint "$p" && [ -d "/proc/$p" ] && return 0
+    $B rm -f "$RUN/speedtest.pid"
+    return 1
+}
+
+# строки списка серверов без комментариев
+speed_list() {
+    if [ -s "$SPEED_LIST" ]; then
+        $B grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$SPEED_LIST" | $B tr -d '\r'
+    else
+        echo "$SPEED_DEFAULT"
+    fi
+}
+
+# speed_find ID — поля сервера в S_ID S_NAME S_CC S_URL S_SIZE S_RANGE S_HTTPS S_MED
+speed_find() {
+    local line
+    line=$(speed_list | $B grep -m1 "^$1|")
+    [ -n "$line" ] || return 1
+    IFS='|'
+    set -f
+    set -- $line
+    set +f
+    IFS=$OIFS
+    S_ID=$1; S_NAME=$2; S_CC=$3; S_URL=$4; S_SIZE=$5; S_RANGE=$6; S_HTTPS=$7; S_MED=$8; S_UP=$9
+}
+
+# speed_cpu_stats ФАЙЛ [ПРИСТАВКА] — <ПРИСТАВКАsamples_n>, <…cpu_avg>, <…cpu_max> по ряду; среднее в CPU_AVG
+speed_cpu_stats() {
+    local t c k m n=0 sum=0 max=0 p=$2
+    [ -f "$1" ] && while read -r t c k m; do
+        n=$((n + 1)); sum=$((sum + c)); [ "$c" -gt "$max" ] && max=$c
+    done < "$1"
+    x "${p}samples_n" "$n"
+    CPU_AVG=""
+    [ $n -gt 0 ] && CPU_AVG=$(( (sum + n / 2) / n ))
+    if [ $n -gt 0 ]; then x "${p}cpu_avg" "$CPU_AVG"; x "${p}cpu_max" "$max"; else x "${p}cpu_avg" ""; x "${p}cpu_max" ""; fi
+}
+
+# история последних 10 замеров (ОЗУ): строки
+# "unix|сервер|via|подпись VPN|прием кбит/с|ЦП %|соединение мс|итог|отдача кбит/с|ЦП отдачи %|сервер отдачи"
+SPEED_HIST=$RUN/speed.history
+
+speed_history_add() {
+    local l
+    l=$(printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s' "$1" "$2" "$3" "$(printf '%s' "$4" | $B tr '|\n' '/ ')" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12}" "${13}" "${14}")
+    { [ -f "$SPEED_HIST" ] && $B tail -n 9 "$SPEED_HIST"; echo "$l"; } > "$SPEED_HIST.tmp"
+    $B mv -f "$SPEED_HIST.tmp" "$SPEED_HIST"
+}
+
+speed_history_xml() {
+    local t sv v lb k c ms st uk uc us ns mk umk
+    printf '<history>'
+    [ -f "$SPEED_HIST" ] && while IFS='|' read -r t sv v lb k c ms st uk uc us ns mk umk; do
+        printf '<run>'
+        x time "$t"; x server "$sv"; x via "$v"; x vpn_label "$lb"; x speed_kbps "$k"; x cpu_avg "$c"
+        x connect_ms "$ms"; x status "$st"; x up_kbps "$uk"; x up_cpu_avg "$uc"; x up_server "$us"
+        x streams "${ns:-1}"; x mt_kbps "$mk"; x up_mt_kbps "$umk"
+        printf '</run>'
+    done < "$SPEED_HIST"
+    printf '</history>'
+}
+
+act_speedtest_show() {
+    if speed_running; then
+        speed_live_xml
+        return 0
+    fi
+    if [ -f "$RUN/speedtest" ]; then
+        $B cat "$RUN/speedtest"
+    else
+        x status none
+    fi
+    speed_history_xml
+}
+
+act_speedtest_servers() {
+    local id name cc url size range https med up
+    [ -x "$CURL" ] && x curl 1 || x curl 0
+    printf '<servers>'
+    speed_list | while IFS='|' read -r id name cc url size range https med up; do
+        case "$id" in ''|*[!A-Za-z0-9_.-]*) continue ;; esac
+        printf '<server>'
+        x id "$id"; x name "$name"; x country "$cc"; x url "$url"; x size_bytes "$size"
+        x range "$range"; x https "$https"; x median_mbps "$med"; x upload_url "$up"
+        printf '</server>'
+    done
+    printf '</servers>'
+}
+
+# dns_a ИМЯ СЕРВЕР — IPv4 из DNS по TCP (своего резолвера у root-процессов нет: нет net.dns1)
+dns_a() {
+    local name=$1 srv=$2 f=$RUN/dns.$$
+    dns_q "$name" "$f" 0
+    nc_req "$srv" 53 "$f" 5 > "$f.r"
+    # последняя запись ответа: TYPE=A (0 1) ... RDLENGTH=4 (0 4) и 4 байта адреса
+    set -- $($B tail -c 14 "$f.r" | $B od -v -An -tu1)
+    $B rm -f "$f" "$f.q" "$f.r"
+    [ $# = 14 ] && [ "$1 $2" = "0 1" ] && [ "$9 ${10}" = "0 4" ] || return 1
+    echo "${11}.${12}.${13}.${14}"
+}
+
+# dns_q ИМЯ ФАЙЛ EDNS — запрос A для DNS по TCP (с длиной в начале); EDNS=1 — с записью OPT (EDNS0, 4096)
+dns_q() {
+    local name=$1 f=$2 e=$3 l n
+    : > "$f.q"
+    IFS=.
+    for l in $name; do
+        printf "\\$(printf %03o ${#l})" >> "$f.q"
+        printf '%s' "$l" >> "$f.q"
+    done
+    IFS=$OIFS
+    printf '\000\000\001\000\001' >> "$f.q"
+    [ "$e" = 1 ] && printf '\000\000\051\020\000\000\000\000\000\000\000' >> "$f.q"
+    n=$((12 + $($B wc -c < "$f.q")))
+    {
+        printf "\\$(printf %03o $((n / 256)))\\$(printf %03o $((n % 256)))"
+        if [ "$e" = 1 ]; then
+            printf '\022\064\001\000\000\001\000\000\000\000\000\001'
+        else
+            printf '\022\064\001\000\000\001\000\000\000\000\000\000'
+        fi
+        $B cat "$f.q"
+    } > "$f"
+}
+
+# dns_has ИМЯ СЕРВЕР EDNS IP — в ответе есть запись A с адресом IP (где бы она ни стояла)
+dns_has() {
+    local f=$RUN/dnsh.$$ hex want
+    dns_q "$1" "$f" "$3"
+    nc_req "$2" 53 "$f" 5 > "$f.r"
+    hex=$($B od -v -An -tx1 "$f.r" | $B tr -d ' \n')
+    $B rm -f "$f" "$f.q" "$f.r"
+    want=$(IFS=.; set -- $4; printf '%02x%02x%02x%02x' "$1" "$2" "$3" "$4")
+    # TYPE A, CLASS IN, TTL (4 байта), RDLENGTH 4, адрес
+    echo "$hex" | $B grep -q "00010001........0004$want"
+}
+
+resolve() {
+    local srv ip
+    case "$1" in *[!0-9.]*) ;; *) echo "$1"; return 0 ;; esac
+    $B timeout -t 5 /app/hijacks/bin/web_hook_client monitoring status 1 1 > "$RUN/speed.mon" 2>/dev/null
+    for srv in 127.0.0.1 \
+        $($B sed -n 's:.*<PrimaryDns>\([0-9.]*\)</PrimaryDns>.*:\1:p' "$RUN/speed.mon") \
+        $($B sed -n 's:.*<SecondaryDns>\([0-9.]*\)</SecondaryDns>.*:\1:p' "$RUN/speed.mon"); do
+        ip=$(dns_a "$1" "$srv") && { echo "$ip"; return 0; }
+    done
+    return 1
+}
+
+# speed_last_t РЯД — время последней точки
+speed_last_t() {
+    local t l=0 rest
+    [ -f "$1" ] && while read -r t rest; do l=$t; done < "$1"
+    echo "$l"
+}
+
+# speed_mem — MEM_AVAIL: свободно + буферы + кэш, КБ (встроенным read, без внешних процессов)
+speed_mem() {
+    local k v u mf=0 mb=0 mc=0
+    while read -r k v u; do
+        case "$k" in
+            MemFree:) mf=$v ;;
+            Buffers:) mb=$v ;;
+            Cached:) mc=$v; break ;;
+        esac
+    done < /proc/meminfo
+    MEM_AVAIL=$((mf + mb + mc))
+}
+
+SPEED_TLS_NOTE="возможно, предел шифрования в процессоре"
+
+# speed_pick_mt АВТО АДРЕС — сервер для приема в несколько потоков. На HTTPS несколько потоков упираются в шифрование
+# в процессоре раньше, чем в связь. При автовыборе берется отвечающий сервер HTTP с Range и лучшей медианой,
+# иначе остается прежний сервер с пометкой. Сервер, выбранный пользователем, не меняется. Итог в M_URL M_SRV M_NAME M_NOTE.
+speed_pick_mt() {
+    local id
+    M_URL=$2; M_SRV=$DN_ID; M_NAME=$DN_NAME; M_NOTE=""
+    case "$2" in https://*) ;; *) return 0 ;; esac
+    if [ "$1" = 1 ]; then
+        for id in $(speed_list | $B awk -F'|' '$7 == "0" && $6 == "1" {print $8 "|" $1}' | $B sort -t'|' -k1 -n -r | $B cut -d'|' -f2); do
+            speed_find "$id" || continue
+            speed_connect "$S_URL" 1 > /dev/null || continue
+            M_URL=$S_URL; M_SRV=$S_ID; M_NAME=$S_NAME; DN_RANGE=$S_RANGE; DN_SIZE=$S_SIZE
+            return 0
+        done
+    fi
+    M_NOTE=$SPEED_TLS_NOTE
+}
+
+# speed_mt НАПРАВЛЕНИЕ N ВСЕГО_БАЙТ ТАЙМАУТ ИНТЕРФЕЙС АДРЕС РЯД — фаза из N одновременных curl.
+# Всего байт делится между потоками: объем замера не растет с N. Ни один поток не пишет на диск и в ОЗУ:
+# прием в /dev/null, отдача — чтение общего разреженного файла.
+# Прием: разные участки файла (-r), если он достаточно велик; сервер без Range — поток режет head.
+# Отдача: один POST на поток или (сервер с лимитом тела, up_mode=chunks) куски по 1 МиБ через --next.
+# Скорость — по счетчику интерфейса после разгона (speed_window).
+# Итог в MT_BYTES MT_US MT_KBPS MT_WIN MT_CNT MT_MEM MT_ERR.
+speed_mt() {
+    local d=$1 n=$2 tot=$3 to=$4 dev=$5 url=$6 ser=$7 lim i=0 start r pids="" need
+    local mm=$RUN/speed.done.mt bf=$RUN/speed.body.mt body cnt j p c0 c1 a b c e g ok okn=0 dm=0 dmin="" pm="" di pi lastcode=""
+    local fmt='%{size_download} %{time_total} %{time_starttransfer} %{http_code} %{exitcode}'
+    MT_BYTES=0; MT_US=0; MT_KBPS=""; MT_WIN=""; MT_CNT=""; MT_MEM=""; MT_ERR=""
+    speed_mem
+    need=$((16384 + n * 4096))
+    if [ "$MEM_AVAIL" -lt "$need" ]; then
+        MT_ERR="потоки не запускались: мало памяти, доступно $((MEM_AVAIL / 1024)) МиБ, нужно $((need / 1024))"
+        return 0
+    fi
+    lim=$((tot / n))
+    $B rm -f "$mm" "$RUN"/speed.mt.*
+    if [ "$d" = up ]; then
+        fmt='%{size_upload} %{time_total} %{time_pretransfer} %{http_code} %{exitcode}'
+        body=$lim; cnt=1
+        case "$umode" in chunks*) body=1048576; cnt=$((lim / 1048576)); [ "$cnt" -gt 0 ] || cnt=1 ;; esac
+        speed_up_file "$bf" "$body"
+        c0=$(speed_txb "$dev")
+    else
+        c0=$(speed_rx "$dev")
+    fi
+    if [ "$d" = up ]; then
+        speed_sampler "$mm" $(( (to + 2) * 4 )) "$dev" tx "$ser" &
+    else
+        speed_sampler "$mm" $(( (to + 2) * 4 )) "$dev" rx "$ser" &
+    fi
+    p=$!
+    while [ $i -lt "$n" ]; do
+        if [ "$d" = up ]; then
+            (
+                set --
+                j=0
+                while [ $j -lt "$cnt" ]; do
+                    [ $j -gt 0 ] && set -- "$@" --next
+                    set -- "$@" -s -o /dev/null $SPEED_IFOPT --connect-timeout 3 --max-time "$to" --cacert "$CACERT" -X POST -T "$bf" \
+                        -H 'Content-Type: application/octet-stream' -H 'Expect:' -w "$fmt\\n" "$url"
+                    j=$((j + 1))
+                done
+                $B timeout -t $((to + 3)) "$CURL" "$@" > "$RUN/speed.mt.$i" 2>/dev/null
+            ) < /dev/null &
+        elif [ "$DN_RANGE" = 1 ]; then
+            start=0
+            case "$DN_SIZE" in ''|*[!0-9]*) ;; *) [ $((n * lim)) -le "$DN_SIZE" ] && start=$((i * lim)) ;; esac
+            r="-r $start-$((start + lim - 1))"
+            $B timeout -t $((to + 3)) "$CURL" -s -o /dev/null $r $SPEED_IFOPT --connect-timeout 3 --max-time "$to" \
+                --cacert "$CACERT" -w "$fmt\\n" "$url" > "$RUN/speed.mt.$i" 2>/dev/null < /dev/null &
+        else
+            (
+                $B timeout -t $((to + 3)) "$CURL" -s -o - $SPEED_IFOPT --connect-timeout 3 --max-time "$to" \
+                    --cacert "$CACERT" -w "%{stderr}$fmt\\n" "$url" 2> "$RUN/speed.mt.$i" | $B head -c "$lim" > /dev/null
+            ) < /dev/null &
+        fi
+        pids="$pids $!"
+        i=$((i + 1))
+    done
+    wait $pids
+    if [ "$d" = up ]; then speed_end "$ser" tx "$dev"; else speed_end "$ser" rx "$dev"; fi
+    : > "$mm"
+    wait "$p"
+    if [ "$d" = up ]; then c1=$(speed_txb "$dev"); else c1=$(speed_rx "$dev"); fi
+    MT_CNT=$((c1 - c0))
+    i=0
+    while [ $i -lt "$n" ]; do
+        ok=0; di=0; pi=""
+        if [ -f "$RUN/speed.mt.$i" ]; then
+            while read -r a b c e g; do
+                lastcode=$e
+                case "$e:$g" in
+                    2??:*|*:28) ;;
+                    *) continue ;;
+                esac
+                [ "${a:-0}" -gt 0 ] || continue
+                ok=1
+                MT_BYTES=$((MT_BYTES + a))
+                di=$((di + $(tus "$b")))
+                [ -n "$pi" ] || pi=$(tus "$c")
+            done < "$RUN/speed.mt.$i"
+        fi
+        if [ "$ok" = 1 ]; then
+            okn=$((okn + 1))
+            [ "$di" -gt "$dm" ] && dm=$di
+            if [ -z "$dmin" ] || [ "$di" -lt "$dmin" ]; then dmin=$di; fi
+            if [ -z "$pm" ] || [ "$pi" -lt "$pm" ]; then pm=$pi; fi
+        fi
+        i=$((i + 1))
+    done
+    $B rm -f "$RUN"/speed.mt.* "$bf" "$mm"
+    if [ "$okn" = 0 ]; then
+        case "$lastcode" in
+            '') MT_ERR="потоки не дали ответа: не хватило памяти или нет соединения" ;;
+            000) MT_ERR="потоки не прошли: нет соединения с сервером" ;;
+            *) MT_ERR="потоки не прошли: сервер ответил $lastcode" ;;
+        esac
+    else
+        [ "$okn" = "$n" ] || MT_ERR="работали $okn из $n потоков"
+        MT_US=$((dm - ${pm:-0})); [ "$MT_US" -gt 0 ] || MT_US=1
+        speed_window "$ser" "$((dmin / 1000))"
+        MT_KBPS=$W_KBPS; MT_WIN=$W_S
+    fi
+    MT_MEM=""
+    while read -r a b c e g; do
+        if [ -z "$MT_MEM" ] || [ "${e:-0}" -lt "$MT_MEM" ]; then MT_MEM=$e; fi
+    done < "$ser"
+}
+
+# speed_end РЯД rx|tx ИНТЕРФЕЙС — время и счетчик интерфейса сразу после конца передачи, для speed_window
+speed_end() {
+    local v rest b
+    read -r v rest < /proc/uptime
+    if [ "$2" = tx ]; then b=$(speed_txb "$3"); else b=$(speed_rx "$3"); fi
+    echo "${v%%.*}${v##*.} $b" > "$1.end"
+}
+
+# speed_window РЯД [КОНЕЦ_МС] — скорость после разгона: байты интерфейса от первой точки не раньше 2 с до конца передачи.
+# КОНЕЦ_МС — когда закончил первый из потоков: дальше скорость падает из-за предела объема, а не из-за связи,
+# поэтому конец — последняя точка до этого времени, если от начала отрезка до нее не меньше 500 мс.
+# Фаза короче 2 с — за всю фазу. Итог в W_KBPS (кбит/с) и W_S (секунды).
+speed_window() {
+    local p0 b0 cu b t c k m cb t0=0 cb0=0 te ce ms lim=${2:-0} lt=0 lc=0
+    W_KBPS=""; W_S=""
+    [ -f "$1.start" ] && [ -f "$1.end" ] || return 0
+    read -r p0 b0 < "$1.start"
+    read -r cu b < "$1.end"
+    te=$(( (cu - p0) * 10 )); ce=$((b - b0))
+    [ -f "$1" ] && while read -r t c k m cb; do
+        if [ "$t0" = 0 ] && [ "$t" -ge 2000 ]; then t0=$t; cb0=$cb; fi
+        if [ "$t" -le "$lim" ]; then lt=$t; lc=$cb; fi
+    done < "$1"
+    if [ "$t0" -gt 0 ] && [ $((lt - t0)) -ge 500 ]; then te=$lt; ce=$lc; fi
+    ms=$((te - t0))
+    if [ "$ms" -lt 200 ]; then t0=0; cb0=0; ms=$te; fi
+    [ "$ms" -gt 0 ] || return 0
+    W_KBPS=$(( (ce - cb0) * 8 / ms ))
+    W_S="$((ms / 1000)).$((ms % 1000 / 100))"
+}
+
+# speed_sampler МЕТКА МАКС_ТИКОВ ИНТЕРФЕЙС — раз в 250 мс строка "t_мс cpu_pct kbps память байты_с_начала" в $RUN/speed.series.
+# Сам почти не грузит ЦП: /proc/stat, /proc/uptime и /proc/net/dev читает встроенным read,
+# внешний процесс за тик один — usleep.
+# speed_sampler МЕТКА МАКС_ТИКОВ ИНТЕРФЕЙС [rx|tx] [ФАЙЛ]
+speed_sampler() {
+    local m=$1 lim=$2 dev=$3 cf=/sys/class/net/$3/statistics/rx_bytes out=${5:-$RUN/speed.series} i=0 b0 c us ni sy id io irq sirq st rest pt pi ct ci p0 pu cu prx rx v dt r ph off=0 tt t
+    # фаза и сдвиг времени: внутри samples и up_samples время сквозное
+    case "$out" in
+        *.dm) ph=download_mt; off=$(speed_last_t "$RUN/speed.series") ;;
+        *.up) ph=upload ;;
+        *.um) ph=upload_mt; off=$(speed_last_t "$RUN/speed.series.up") ;;
+        *) ph=download ;;
+    esac
+    : > "$out.xml"
+    # счетчик — одной строкой из /sys: разбор /proc/net/dev встроенным read идет по байту и заметно нагружает ЦП
+    [ "$4" = tx ] && cf=/sys/class/net/$3/statistics/tx_bytes
+    : > "$out"
+    read -r c us ni sy id io irq sirq st rest < /proc/stat
+    pt=$((us + ni + sy + id + io + irq + sirq + ${st:-0})); pi=$((id + io))
+    read -r v rest < /proc/uptime; pu=${v%%.*}${v##*.}; p0=$pu
+    prx=0
+    read -r prx < "$cf"
+    b0=$prx
+    echo "$p0 $b0" > "$out.start"
+    while [ ! -f "$m" ] && [ $i -lt "$lim" ]; do
+        $B usleep 250000
+        i=$((i + 1))
+        read -r c us ni sy id io irq sirq st rest < /proc/stat
+        ct=$((us + ni + sy + id + io + irq + sirq + ${st:-0})); ci=$((id + io))
+        read -r v rest < /proc/uptime; cu=${v%%.*}${v##*.}
+        rx=$prx
+        read -r rx < "$cf"
+        dt=$((ct - pt)); [ "$dt" -gt 0 ] || dt=1
+        r=$((cu - pu)); [ "$r" -gt 0 ] || r=1
+        # время в мс от начала; скорость — байты * 8 / (сотые * 10) = кбит/с
+        speed_mem
+        echo "$(( (cu - p0) * 10 )) $(( (100 * (dt - (ci - pi)) + dt / 2) / dt )) $(( (rx - prx) * 4 / (r * 5) )) $MEM_AVAIL $((rx - b0))" >> "$out"
+        tt=$(( (cu - p0) * 10 + off ))
+        printf '<s><phase>%s</phase><t>%d.%02d</t><t_ms>%s</t_ms><cpu_pct>%s</cpu_pct><kbps>%s</kbps></s>' \
+            "$ph" $((tt / 1000)) $((tt % 1000 / 10)) "$tt" "$(( (100 * (dt - (ci - pi)) + dt / 2) / dt ))" "$(( (rx - prx) * 4 / (r * 5) ))" >> "$out.xml"
+        pt=$ct; pi=$ci; pu=$cu; prx=$rx
+    done
+}
+
+# speed_rx ИНТЕРФЕЙС — принято байт (из /proc/net/dev)
+speed_rx() {
+    local l r
+    while read -r l; do
+        case "$l" in
+            "$1:"*)
+                r=${l#*:}
+                set -- $r
+                echo "${1:-0}"
+                return 0
+                ;;
+        esac
+    done < /proc/net/dev
+    echo 0
+}
+
+# speed_txb ИНТЕРФЕЙС — отправлено байт (9-е поле после "имя:" в /proc/net/dev)
+speed_txb() {
+    local l
+    while read -r l; do
+        case "$l" in "$1:"*) set -- ${l#*:}; echo "${9:-0}"; return 0 ;; esac
+    done < /proc/net/dev
+    echo 0
+}
+
+# speed_tcp — счетчики TCP всей системы: TCP_RETR (RetransSegs), TCP_OUT (OutSegs) из /proc/net/snmp
+speed_tcp() {
+    local l
+    TCP_RETR=0; TCP_OUT=0
+    while read -r l; do
+        case "$l" in
+            Tcp:*[0-9]*)
+                set -- $l
+                case "${13}" in ''|*[!0-9]*) ;; *) TCP_RETR=${13}; TCP_OUT=${12} ;; esac
+                ;;
+        esac
+    done < /proc/net/snmp
+}
+
+# speed_up_file ФАЙЛ РАЗМЕР — тело отдачи: разреженный файл (читается как нули, ОЗУ почти не занимает).
+# Нули, а не /dev/urandom: на этом ЦП urandom дает 8 МиБ за 4,9 с и сам ограничивал бы скорость.
+speed_up_file() {
+    $B rm -f "$1"
+    $B dd if=/dev/zero of="$1" bs=1 count=0 seek="$2" 2>/dev/null
+    [ "$($B wc -c < "$1")" = "$2" ] || $B head -c "$2" /dev/zero > "$1"
+}
+
+# speed_upload АДРЕС ТАЙМАУТ ИНТЕРФЕЙС — отдача до UCAP байт и до ТАЙМАУТ с, одним соединением:
+# каждое новое соединение — пауза на TCP+TLS без данных, на графике это пила.
+#   обычно: один POST на 8 МиБ (curl -T шлет файл потоком, не читая в память);
+#   есть лимит тела (HostKey: 413 от 2 МиБ; другие — по 413 или ошибке): POST по 1 МиБ через --next,
+#   curl держит то же соединение (num_connects 0 у следующих).
+# Скорость: байты / сумма (time_total − time_pretransfer). Итог в ubytes uus nup uok ucode umode uconn.
+speed_upload() {
+    local url=$1 to=$2 dev=$3 f=$RUN/speed.body w0 w left o
+    local fmt='%{size_upload} %{time_total} %{time_pretransfer} %{http_code} %{exitcode} %{num_connects}'
+    ubytes=0; uus=0; nup=0; uok=0; ucode=""; umode=single; uconn=0; ucurl=""; ubad=0
+    rf /proc/uptime; w0=${RV%% *}; w0=${w0%%.*}${w0##*.}
+    case "$url" in *hostkey.com*) umode=chunks ;; esac
+    if [ "$umode" = single ]; then
+        speed_up_file "$f" "$UCAP"
+        o=$($B timeout -t $((to + 5)) "$CURL" -s -o /dev/null $SPEED_IFOPT --connect-timeout 3 --max-time "$to" \
+            --cacert "$CACERT" -X POST -T "$f" -H 'Content-Type: application/octet-stream' -H 'Expect:' \
+            -w "$fmt" "$url" 2>>"$E")
+        set -- $o
+        nup=1; ucode=$4; uconn=${6:-0}; ucurl=$5
+        rf /proc/uptime; w=${RV%% *}; w=${w%%.*}${w##*.}
+        case "$ucode:$5" in
+            2??:*)
+                ubytes=${1:-0}
+                uus=$(( $(tus "${2:-0}") - $(tus "${3:-0}") ))
+                [ "$ubytes" -gt 0 ] && uok=1
+                ;;
+            *:28)
+                # оборвано по общему времени: отданное считается. Раньше (рукопожатие не прошло) — куски
+                if [ "${1:-0}" -gt 0 ] && [ $((w - w0)) -ge $((to * 100 - 100)) ]; then
+                    ubytes=$1
+                    uus=$(( $(tus "${2:-0}") - $(tus "${3:-0}") ))
+                    uok=1
+                else
+                    umode=chunks
+                fi
+                ;;
+            *) umode=chunks ;;
+        esac
+        # ни байта тела: рукопожатие или соединение не прошли, счетчику интерфейса верить нельзя
+        [ "$umode" = chunks ] && [ "${1:-0}" = 0 ] && ubad=1
+    fi
+    if [ "$umode" = chunks ]; then
+        rf /proc/uptime; w=${RV%% *}; w=${w%%.*}${w##*.}
+        left=$((to * 100 - (w - w0)))
+        if [ "$left" -gt 50 ]; then
+            speed_up_chunks "$url" "$((left / 100 + 1))" "$dev"
+        fi
+    fi
+    $B rm -f "$f"
+}
+
+# speed_up_chunks АДРЕС ТАЙМАУТ ИНТЕРФЕЙС — POST по 1 МиБ (всего UCAP) в одном curl (--next, одно соединение).
+# curl пишет -w по мере переходов; по таймауту он убит, последние строки могут потеряться: скорость
+# по оставшимся строкам верна. Ни одной строки (медленно) — байты по tx интерфейса и время по часам.
+speed_up_chunks() {
+    local url=$1 to=$2 dev=$3 f=$RUN/speed.body i=0 tx0 w0 w l a b c d e g
+    local fmt='%{size_upload} %{time_total} %{time_pretransfer} %{http_code} %{exitcode} %{num_connects}\n'
+    speed_up_file "$f" 1048576
+    # пробный большой POST, если был, не считается
+    ucode=""; nup=0
+    tx0=$(speed_txb "$dev")
+    rf /proc/uptime; w0=${RV%% *}; w0=${w0%%.*}${w0##*.}
+    set --
+    while [ $i -lt $((UCAP / 1048576)) ]; do
+        [ $i -gt 0 ] && set -- "$@" --next
+        set -- "$@" -s -o /dev/null $SPEED_IFOPT --connect-timeout 3 --max-time "$to" --cacert "$CACERT" -X POST -T "$f" \
+            -H 'Content-Type: application/octet-stream' -H 'Expect:' -w "$fmt" "$url"
+        i=$((i + 1))
+    done
+    $B timeout -t "$to" "$CURL" "$@" > "$RUN/speed.up.w" 2>>"$E"
+    while read -r a b c d e g; do
+        ucode=$d
+        case "$d" in 2??) ;; *) continue ;; esac
+        nup=$((nup + 1)); uok=$((uok + 1)); uconn=$((uconn + ${g:-0}))
+        ubytes=$((ubytes + ${a:-0}))
+        l=$(( $(tus "${b:-0}") - $(tus "${c:-0}") )); [ "$l" -gt 0 ] && uus=$((uus + l))
+    done < "$RUN/speed.up.w"
+    if [ "$nup" = 0 ]; then
+        rf /proc/uptime; w=${RV%% *}; w=${w%%.*}${w##*.}
+        ubytes=$(( $(speed_txb "$dev") - tx0 ))
+        uus=$(( (w - w0) * 10000 ))
+        # строк нет совсем: curl убит на первом куске; отказ сервера дал бы строку с кодом.
+        # Оценка по счетчику — только если соединение точно работало и ушло заметно больше рукопожатия
+        if [ "$ubytes" -ge 131072 ] && [ -z "$ucode" ] && [ "$ubad" != 1 ]; then
+            uok=1; umode=chunks_est
+        else
+            ubytes=0
+        fi
+    fi
+    $B rm -f "$RUN/speed.up.w"
+}
+
+# tus A — секунды вида 1.234567 (curl -w) в микросекунды
+tus() {
+    echo $(( ${1%%.*} * 1000000 + $(echo "${1#*.}000000" | $B cut -c1-6 | $B sed 's/^0*//;s/^$/0/') ))
+}
+
+# tsub A B — разность секунд вида 1.234567 (curl -w), результат того же вида
+tsub() {
+    local a b
+    a=$(( ${1%%.*} * 1000000 + $(echo "${1#*.}000000" | $B cut -c1-6 | $B sed 's/^0*//;s/^$/0/') ))
+    b=$(( ${2%%.*} * 1000000 + $(echo "${2#*.}000000" | $B cut -c1-6 | $B sed 's/^0*//;s/^$/0/') ))
+    a=$((a - b)); [ "$a" -gt 0 ] || a=1
+    printf '%d.%06d' $((a / 1000000)) $((a % 1000000))
+}
+
+# speed_pick_up — сервер отдачи, если у выбранного для приема его нет: среди всех с upload_url
+# (9-е поле) с самым быстрым соединением, по тому же пути (--interface при via). Любой ответ HTTP годится:
+# адрес отдачи на HEAD может отвечать 405. Итог в U_ID U_NAME U_URL; код 1 — ни один не ответил
+speed_pick_up() {
+    local id ms o best="" bestms=""
+    for id in $(speed_list | $B grep '^\([^|]*|\)\{8\}[^|]\{1,\}' | $B cut -d'|' -f1); do
+        speed_find "$id" || continue
+        o=$($B timeout -t 6 "$CURL" -s -o /dev/null -I $SPEED_IFOPT --connect-timeout 3 --max-time 4 --cacert "$CACERT" \
+            -w '%{time_connect} %{http_code}' "$S_UP" 2>/dev/null)
+        set -- $o
+        case "$2" in ''|000) echo "up:$id -" >> "$RUN/speed.cand"; continue ;; esac
+        ms=$(( $(tus "$1") / 1000 ))
+        echo "up:$id $ms" >> "$RUN/speed.cand"
+        if [ -z "$bestms" ] || [ "$ms" -lt "$bestms" ]; then best=$id; bestms=$ms; fi
+    done
+    [ -n "$best" ] || return 1
+    speed_find "$best" || return 1
+    U_ID=$S_ID; U_NAME=$S_NAME; U_URL=$S_UP
+}
+
+# speed_connect URL RANGE — время TCP-соединения в мс (curl -w time_connect), код 1 при ошибке;
+# RANGE=1 — сервер отдает часть файла (-r 0-0), иначе запрос HEAD
+speed_connect() {
+    local o r="-I"
+    [ "$2" = 1 ] && r="-r 0-0"
+    o=$($B timeout -t 6 "$CURL" -s -o /dev/null $r $SPEED_IFOPT --max-time 4 --cacert "$CACERT" \
+        -w '%{time_connect} %{http_code}' "$1" 2>/dev/null)
+    set -- $o
+    case "$2" in 2??) ;; *) return 1 ;; esac
+    # секунды с дробью → мс
+    echo $(( ${1%%.*} * 1000 + $(echo "${1#*.}000" | $B cut -c1-3 | $B sed 's/^0*//;s/^$/0/') ))
+}
+
+# замер в фоне; результат — XML-фрагмент в $RUN/speedtest
+speed_measure() {
+    local sel=$1 url=$2 to=$3 via=$4 dir=$5 streams=${6:-1} st=error bytes=0 secs=0 kbps=0 code ip dev E=$RUN/speedtest.err M=$RUN/speed.done
+    local o id best="" bestms="" ms n=0 rng w0 w left nreq=0 xus b cms=""
+    local wan auto=0 tot ust="" ubytes=0 uus=0 ukbps="" ucode MU=$RUN/speed.done.up nup=0 uok=0 umode="" uconn=0 utx="" ures="" uos="" rs0 os0 tx0 uerr="" ucurl="" ubad=0
+    : > "$E"
+    UP_CPU_AVG=""
+    # по умолчанию прием и отдача; о любой неудаче отдачи говорят up_status и up_error
+    [ -n "$dir" ] || dir=both
+    [ "$sel" = auto ] && auto=1
+    DIR=$dir; U_ID=""; U_NAME=""; U_URL=""
+    M_SRV=""; M_NAME=""; M_NOTE=""; UM_NOTE=""
+    # предел объема на фазу, МиБ: с потоками 16 + 30 + 6 + 12, без потоков 30 + 12. Срабатывает на быстрой связи.
+    # Всего с потоками 64 МиБ, через туннель 58: счетчик eth_x на них показывает около 72 и 71 МБ (+7 % и +17 %)
+    if [ "$streams" -gt 1 ]; then DCAP=16777216; UCAP=6291456; else DCAP=31457280; UCAP=12582912; fi
+    TOTAL=67108864; [ -n "$via" ] && TOTAL=60817408
+    W_DN=""; W_UP=""; WAN0=""
+    M_KBPS=""; M_WIN=""; M_BYTES=""; M_US=0; M_CNT=""; M_MEM=""; M_ERR=""; M_CPU_AVG=""; UM_KBPS=""; UM_WIN=""; UM_BYTES=""; UM_US=0; UM_CNT=""; UM_MEM=""; UM_ERR=""; UM_CPU_AVG=""
+    [ "$dir" = down ] || { ust=error; uerr="отдача не удалась: нет сети"; }
+    $B rm -f "$M" "$MU" "$RUN/speed.series" "$RUN/speed.series.up" "$RUN/speed.series.dm" "$RUN/speed.series.um" "$RUN/speed.cur" "$RUN/speed.cand" "$RUN"/speed.series*.start "$RUN"/speed.series*.end "$RUN"/speed.series*.xml
+    dev=$($B ip route show default 2>/dev/null | $B sed -n 's/^default .* dev \([^ ]*\).*/\1/p' | $B head -n1)
+    # через туннель: curl --interface, скорость в точках — по приему на интерфейсе туннеля
+    # для стенда: интерфейс для точек скорости можно задать (SPEED_DEV)
+    [ -n "$SPEED_DEV" ] && dev=$SPEED_DEV
+    # весь трафик замера: по счетчику внешнего интерфейса; через туннель там те же данные с его заголовками
+    wan=$dev
+    [ -n "$wan" ] && WAN0=$(( $(speed_rx "$wan") + $(speed_txb "$wan") ))
+    SPEED_IFOPT=""; VIA=direct; VPN_PROFILE=""; VPN_LABEL=""
+    if [ -n "$via" ]; then
+        dev=$via; SPEED_IFOPT="--interface $via"; VIA=awg
+        # какой профиль AmneziaWG сейчас активен (из status, без ключей)
+        awg_svc 10 status > "$RUN/speed.awg" 2>/dev/null
+        VPN_PROFILE=$($B sed -n 's/^profile=//p' "$RUN/speed.awg" | $B head -n1)
+        VPN_LABEL=$($B sed -n 's/^profile_label=//p' "$RUN/speed.awg" | $B head -n1)
+        $B rm -f "$RUN/speed.awg"
+    fi
+    if [ -z "$dev" ]; then
+        st=nonet
+        echo "нет маршрута по умолчанию" > "$E"
+    else
+        [ "$sel" = auto ] && { x status running; x phase select; x server auto; } > "$RUN/speed.info"
+        if [ "$sel" = auto ] && [ ! -x "$CURL" ]; then
+            # без curl — первый сервер с http://
+            sel=$(speed_list | $B grep -m1 '^[^|]*|[^|]*|[^|]*|http://' | $B cut -d'|' -f1)
+        elif [ "$sel" = auto ]; then
+            # 3 сервера с лучшей медианой; из них — с самым быстрым соединением
+            # для отдачи — только серверы с адресом отдачи (9-е поле)
+            for id in $(speed_list | { if [ "$dir" = up ]; then $B grep '^\([^|]*|\)\{8\}[^|]\{1,\}'; else $B cat; fi; } \
+                    | $B sort -t'|' -k8 -n -r | $B cut -d'|' -f1 | $B head -n 3); do
+                speed_find "$id" || continue
+                ms=$(speed_connect "$S_URL" "$S_RANGE") || { echo "$id -" >> "$RUN/speed.cand"; continue; }
+                echo "$id $ms" >> "$RUN/speed.cand"
+                if [ -z "$bestms" ] || [ "$ms" -lt "$bestms" ]; then best=$id; bestms=$ms; fi
+            done
+            [ -n "$best" ] || best=$(speed_list | $B head -n1 | $B cut -d'|' -f1)
+            sel=$best
+        fi
+        if [ -n "$sel" ] && speed_find "$sel"; then url=$S_URL; else S_ID=""; S_NAME=""; S_RANGE=""; S_UP=""; fi
+        # отдача: у выбранного сервера или, если у него адреса нет, у лучшего из других (см. speed_pick_up)
+        U_ID=$S_ID; U_NAME=$S_NAME; U_URL=$S_UP
+        [ -n "$U_URL" ] || { U_ID=""; U_NAME=""; }
+        DN_ID=$S_ID; DN_NAME=$S_NAME; DN_RANGE=$S_RANGE; DN_SIZE=$S_SIZE
+        {
+            x status running; x phase download; x server "$DN_ID"; x name "$DN_NAME"; x url "$url"
+            x direction "$dir"; x via "$VIA"; x vpn_profile "$VPN_PROFILE"; x vpn_label "$VPN_LABEL"
+        } > "$RUN/speed.info"
+        [ "$dir" = up ] || speed_sampler "$M" $(( (to + 2) * 4 )) "$dev" &
+        if [ "$dir" = up ]; then
+            :
+        elif [ -x "$CURL" ]; then
+            # не больше DCAP с начала файла (зеркала меняют файлы) и не дольше to секунд;
+            # файл кончился раньше — запрос повторяется, пока не выйдет время или объем.
+            rng=""
+            rf /proc/uptime; w0=${RV%% *}; w0=${w0%%.*}${w0##*.}
+            bytes=0; xus=0; nreq=0
+            while :; do
+                rf /proc/uptime; w=${RV%% *}; w=${w%%.*}${w##*.}
+                left=$((to * 100 - (w - w0)))
+                [ "$left" -gt 50 ] || break
+                [ "$S_RANGE" = 1 ] && rng="-r 0-$((DCAP - bytes - 1))"
+                if [ -n "$rng" ]; then
+                    o=$($B timeout -t $((left / 100 + 5)) "$CURL" -s -o /dev/null $rng $SPEED_IFOPT \
+                        --max-time "$((left / 100)).$((left % 100 / 10))" --cacert "$CACERT" \
+                        -w '%{size_download} %{time_total} %{time_starttransfer} %{http_code} %{remote_ip} %{time_connect}' "$url" 2>>"$E")
+                else
+                    # сервер без Range: объем режет head, curl завершается ошибкой записи — это норма
+                    $B timeout -t $((left / 100 + 5)) "$CURL" -s -o - $SPEED_IFOPT \
+                        --max-time "$((left / 100)).$((left % 100 / 10))" --cacert "$CACERT" \
+                        -w '%{stderr}%{size_download} %{time_total} %{time_starttransfer} %{http_code} %{remote_ip} %{time_connect}' "$url" 2>"$RUN/speed.o" \
+                        | $B head -c "$((DCAP - bytes))" > /dev/null
+                    o=$($B cat "$RUN/speed.o")
+                    $B rm -f "$RUN/speed.o"
+                fi
+                set -- $o
+                nreq=$((nreq + 1))
+                # время TCP-соединения первого запроса, мс
+                [ $nreq = 1 ] && [ -n "$6" ] && cms=$(( $(tus "$6") / 1000 ))
+                code=$4; ip=$5
+                bytes=$((bytes + ${1:-0}))
+                b=$(( $(tus "${2:-0}") - $(tus "${3:-0}") )); [ "$b" -gt 0 ] && xus=$((xus + b))
+                case "$code" in 200|206) ;; *) break ;; esac
+                [ "$bytes" -ge "$DCAP" ] && break
+            done
+            secs=$(printf '%d.%06d' $((xus / 1000000)) $((xus % 1000000)))
+        else
+            case "$url" in https://*) echo "нет curl для https" >> "$E" ;; esac
+            speed_nc "$url" "$to"
+            nreq=1
+        fi
+        [ "$dir" = up ] || speed_end "$RUN/speed.series" rx "$dev"
+        : > "$M"
+        wait
+        if [ "$dir" != up ]; then
+            case "$code" in
+                200|206) [ "$bytes" -gt 0 ] && st=ok ;;
+                000|'') $B grep -q -i -e 'resolve' -e 'unreachable' "$E" && st=nonet ;;
+            esac
+            [ "$st" = ok ] || [ -z "$code" ] || echo "HTTP $code" >> "$E"
+            # секунды "1.234567" → сотые
+            n=$(( ${secs%%.*} * 100 + $(echo "${secs#*.}00" | $B cut -c1-2 | $B sed 's/^0//') ))
+            [ "$n" -gt 0 ] || n=1
+            kbps=$((bytes * 4 / (n * 5)))
+            speed_window "$RUN/speed.series"
+            if [ "$st" = ok ] && [ -n "$W_KBPS" ]; then kbps=$W_KBPS; W_DN=$W_S; fi
+        fi
+        # прием в несколько потоков; реальный объем прошлой фазы учитывается
+        if [ "$streams" -gt 1 ] && [ "$dir" != up ]; then
+            if [ "$st" != ok ]; then
+                M_ERR="потоки не запускались: прием в один поток не удался"
+            elif [ ! -x "$CURL" ]; then
+                M_ERR="потоки не запускались: нет curl (пакет dns)"
+            else
+                tot=$((TOTAL - bytes)); [ "$dir" = both ] && tot=$((tot - 18874368))
+                [ "$tot" -le 31457280 ] || tot=31457280
+                if [ "$tot" -lt $((streams * 1048576)) ]; then
+                    M_ERR="потоки не запускались: лимит трафика замера"
+                else
+                    speed_pick_mt "$auto" "$url"
+                    {
+                        x status running; x phase download_mt; x streams "$streams"; x server "$M_SRV"; x name "$M_NAME"
+                        x url "$M_URL"; x direction "$dir"; x via "$VIA"; x vpn_profile "$VPN_PROFILE"; x vpn_label "$VPN_LABEL"
+                    } > "$RUN/speed.info"
+                    echo "$RUN/speed.series.dm" > "$RUN/speed.cur"
+                    speed_mt down "$streams" "$tot" "$to" "$dev" "$M_URL" "$RUN/speed.series.dm"
+                    M_KBPS=$MT_KBPS; M_WIN=$MT_WIN; M_BYTES=$MT_BYTES; M_US=$MT_US; M_CNT=$MT_CNT; M_MEM=$MT_MEM; M_ERR=$MT_ERR
+                fi
+            fi
+        fi
+        # отдача — см. speed_upload; точки — по tx интерфейса. Молча не пропускается никогда
+        uerr=""; ust=""
+        if [ "$dir" != down ] && [ -z "$U_URL" ] && [ -x "$CURL" ]; then
+            { x status running; x phase select_up; x server "$DN_ID"; x name "$DN_NAME"; x direction "$dir"; x via "$VIA"; } > "$RUN/speed.info"
+            speed_pick_up
+        fi
+        if [ "$dir" != down ] && [ ! -x "$CURL" ]; then
+            ust=error; uerr="отдача не удалась: нет curl (пакет dns)"
+        elif [ "$dir" != down ] && [ -z "$U_URL" ]; then
+            ust=error; uerr="отдача не удалась: ни один сервер отдачи не отвечает"
+        elif [ "$dir" != down ]; then
+            {
+                x status running; x phase upload; x server "$DN_ID"; x name "$DN_NAME"; x url "$U_URL"
+                x up_server "$U_ID"; x up_name "$U_NAME"
+                x direction "$dir"; x via "$VIA"; x vpn_profile "$VPN_PROFILE"; x vpn_label "$VPN_LABEL"
+            } > "$RUN/speed.info"
+            : > "$RUN/speed.series.up"
+            echo "$RUN/speed.series.up" > "$RUN/speed.cur"
+            speed_tcp; rs0=$TCP_RETR; os0=$TCP_OUT
+            tx0=$(speed_txb "$dev")
+            speed_sampler "$MU" $(( (to + 2) * 4 )) "$dev" tx "$RUN/speed.series.up" &
+            speed_upload "$U_URL" "$to" "$dev"
+            speed_end "$RUN/speed.series.up" tx "$dev"
+            : > "$MU"
+            wait
+            speed_tcp; ures=$((TCP_RETR - rs0)); uos=$((TCP_OUT - os0))
+            utx=$(( $(speed_txb "$dev") - tx0 ))
+            [ "$uus" -gt 0 ] || uus=1
+            ukbps=$(( ubytes * 8000 / uus ))
+            if [ "$uok" -gt 0 ] && [ "$ubytes" -gt 0 ]; then
+                ust=ok
+                speed_window "$RUN/speed.series.up"
+                if [ -n "$W_KBPS" ]; then ukbps=$W_KBPS; W_UP=$W_S; fi
+            else
+                ust=error; ukbps=""
+                case "$ucode" in
+                    ''|000) uerr="отдача не удалась: нет соединения с сервером" ;;
+                    *) uerr="отдача не удалась: сервер ответил $ucode" ;;
+                esac
+            fi
+            # прием прошел — замер не ошибка, не удалась только отдача (up_status, up_error)
+            # отдача в несколько потоков
+            if [ "$streams" -gt 1 ] && [ "$ust" = ok ]; then
+                tot=$((TOTAL - bytes - ${M_BYTES:-0} - ubytes))
+                [ "$tot" -le 12582912 ] || tot=12582912
+                if [ "$tot" -lt $((streams * 1048576)) ]; then
+                    UM_ERR="потоки не запускались: лимит трафика замера"
+                else
+                    {
+                        x status running; x phase upload_mt; x streams "$streams"; x server "$DN_ID"; x name "$DN_NAME"; x url "$U_URL"
+                        x up_server "$U_ID"; x up_name "$U_NAME"; x direction "$dir"; x via "$VIA"; x vpn_profile "$VPN_PROFILE"; x vpn_label "$VPN_LABEL"
+                    } > "$RUN/speed.info"
+                    echo "$RUN/speed.series.um" > "$RUN/speed.cur"
+                    case "$U_URL" in https://*) UM_NOTE=$SPEED_TLS_NOTE ;; esac
+                    speed_mt up "$streams" "$tot" "$to" "$dev" "$U_URL" "$RUN/speed.series.um"
+                    UM_KBPS=$MT_KBPS; UM_WIN=$MT_WIN; UM_BYTES=$MT_BYTES; UM_US=$MT_US; UM_CNT=$MT_CNT; UM_MEM=$MT_MEM; UM_ERR=$MT_ERR
+                fi
+            elif [ "$streams" -gt 1 ]; then
+                UM_ERR="потоки не запускались: отдача в один поток не удалась"
+            fi
+        fi
+        [ "$dir" = up ] && st=$ust
+        [ -z "$uerr" ] || echo "$uerr" >> "$E"
+    fi
+    {
+        x status "$st"; x server "$DN_ID"; x name "$DN_NAME"; x url "$url"; x ip "$ip"
+        x via "$VIA"; x vpn_profile "$VPN_PROFILE"; x vpn_label "$VPN_LABEL"; x connect_ms "$cms"
+        x bytes "$bytes"; x seconds "$((n / 100)).$((n % 100 / 10))"; x speed_kbps "$kbps"
+        x requests "$nreq"
+        x direction "$DIR"
+        if [ "$DIR" != up ]; then speed_cpu_stats "$RUN/speed.series"; DN_CPU_AVG=$CPU_AVG; else DN_CPU_AVG=""; fi
+        if [ "$DIR" != down ]; then
+            x up_status "$ust"; x up_error "$uerr"; x up_server "$U_ID"; x up_name "$U_NAME"; x upload_url "$U_URL"; x up_bytes "$ubytes"
+            x up_seconds "$((uus / 1000000)).$((uus % 1000000 / 100000))"; x up_kbps "$ukbps"; x up_requests "$nup"
+            x up_mode "$umode"; x up_connections "$uconn"; x up_tx_bytes "$utx"; x up_retrans "$ures"; x up_outsegs "$uos"
+            speed_cpu_stats "$RUN/speed.series.up" up_
+            UP_CPU_AVG=$CPU_AVG
+            speed_samples_xml up_samples "$RUN/speed.series.up" "$RUN/speed.series.um"
+        fi
+        x streams "$streams"
+        [ -n "$WAN0" ] && { b=$(( $(speed_rx "$wan") + $(speed_txb "$wan") - WAN0 )); x traffic_mb "$((b / 1000000)).$((b % 1000000 / 100000))"; }
+        x window_s "$W_DN"; x up_window_s "$W_UP"
+        if [ "$streams" -gt 1 ]; then
+            if [ "$DIR" != up ]; then
+                x mt_server "$M_SRV"; x mt_name "$M_NAME"; x mt_note "$M_NOTE"
+                x mt_streams "$streams"; x mt_kbps "$M_KBPS"; x mt_window_s "$M_WIN"; x mt_bytes "$M_BYTES"
+                x mt_seconds "$((M_US / 1000000)).$((M_US % 1000000 / 100000))"; x mt_rx_bytes "$M_CNT"
+                speed_cpu_stats "$RUN/speed.series.dm" mt_
+                x mt_mem_min_kb "$M_MEM"; x mt_error "$M_ERR"
+            fi
+            if [ "$DIR" != down ]; then
+                x up_mt_note "$UM_NOTE"
+                x up_mt_kbps "$UM_KBPS"; x up_mt_window_s "$UM_WIN"; x up_mt_bytes "$UM_BYTES"
+                x up_mt_seconds "$((UM_US / 1000000)).$((UM_US % 1000000 / 100000))"; x up_mt_tx_bytes "$UM_CNT"
+                speed_cpu_stats "$RUN/speed.series.um" up_mt_
+                x up_mt_mem_min_kb "$UM_MEM"; x up_mt_error "$UM_ERR"
+            fi
+        fi
+        x time "$($B date +%s)"
+        if [ -s "$RUN/speed.cand" ]; then
+            printf '<candidates>'
+            while read -r id ms; do printf '<c>'; x id "$id"; x connect_ms "$ms"; printf '</c>'; done < "$RUN/speed.cand"
+            printf '</candidates>'
+        fi
+        speed_samples_xml samples "$RUN/speed.series" "$RUN/speed.series.dm"
+        [ "$st" = ok ] || xfile output "$E"
+    } > "$RUN/speedtest.tmp"
+    $B mv -f "$RUN/speedtest.tmp" "$RUN/speedtest"
+    speed_history_add "$($B date +%s)" "${DN_ID:-${url:-$U_ID}}" "$VIA" "$VPN_LABEL" "$([ "$DIR" = up ] || echo "$kbps")" "$DN_CPU_AVG" "$cms" "$st" "$ukbps" "$UP_CPU_AVG" "$U_ID" "$streams" "$M_KBPS" "$UM_KBPS"
+    $B rm -f "$M" "$RUN/speed.info" "$RUN/speed.cur" "$RUN/speed.cand" "$RUN/speed.req" "$RUN/speed.head" "$RUN/speed.mon" "$RUN/speedtest.pid" "$RUN/speed.history.xml" "$RUN"/speed.series*.start "$RUN"/speed.series*.end "$RUN"/speed.series*.xml
+    log "speedtest $st ${S_ID:-url}${via:+ через $via} $DIR: прием $bytes B ${n}0 ms${ukbps:+, отдача $umode $ubytes B $ukbps кбит/с, соединений $uconn, повторов TCP $ures из $uos}"
+}
+
+# без curl: http:// через nc (DNS по TCP), результат в bytes, secs, code, ip
+speed_nc() {
+    local url=$1 to=$2 hp host port path t0 t1 h M2=$RUN/speed.ncdone
+    hp=${url#http://}
+    case "$hp" in */*) path=/${hp#*/} ;; *) path=/ ;; esac
+    hp=${hp%%/*}; host=${hp%%:*}; port=80
+    case "$hp" in *:*) port=${hp##*:} ;; esac
+    ip=$(resolve "$host") || { code=000; echo "не удалось узнать адрес $host" >> "$RUN/speedtest.err"; return 0; }
+    printf 'GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n' "$path" "$host" > "$RUN/speed.req"
+    $B rm -f "$M2"
+    rf /proc/uptime; t0=${RV%% *}; t0=${t0%%.*}${t0##*.}
+    nc_hold "$RUN/speed.req" "$to" "$M2" \
+        | { $B timeout -t "$to" $B nc "$ip" "$port" 2>>"$RUN/speedtest.err"; : > "$M2"; } \
+        | { $B head -c 512 > "$RUN/speed.head"; $B wc -c > "$RUN/speed.count"; }
+    rf /proc/uptime; t1=${RV%% *}; t1=${t1%%.*}${t1##*.}
+    bytes=$(($($B cat "$RUN/speed.count") + $($B wc -c < "$RUN/speed.head")))
+    h=$($B head -n1 "$RUN/speed.head" | $B tr -d '\r')
+    code=$(echo "$h" | $B sed -n 's:^HTTP/1\.[01] \([0-9]*\).*:\1:p')
+    secs=$(printf '%d.%02d' $(( (t1 - t0) / 100 )) $(( (t1 - t0) % 100 )))
+    $B rm -f "$M2" "$RUN/speed.count"
+}
+
+act_speedtest_run() {
+    local sel=${P_server:-} url=$P_url to=${P_timeout_s:-8} via="" streams
+    is_uint "$to" && [ "$to" -ge 3 ] && [ "$to" -le 60 ] || fail 9003 "Неверное значение: timeout_s"
+    case "$P_direction" in ''|down|up|both) ;; *) fail 9003 "Неверное значение: direction (down, up или both)" ;; esac
+    # без поля — 4 потока (выбрано замером, см. API.md); без curl потоков нет, замер идет через nc
+    if [ -n "$P_streams" ]; then
+        streams=$P_streams
+        case "$streams" in 1|2|3|4) ;; *) fail 9003 "Неверное значение: streams (от 1 до 4)" ;; esac
+        [ "$streams" = 1 ] || [ -x "$CURL" ] || fail 9006 "Не найдено: curl (пакет dns) — замер в несколько потоков без него невозможен"
+    else
+        streams=4
+        [ -x "$CURL" ] || streams=1
+    fi
+    case "$P_via" in
+        '') ;;
+        awg)
+            [ -x "$CURL" ] || fail 9006 "Не найдено: curl (пакет dns) — замер через туннель без него невозможен"
+            $IP link show "$AWG_IF" > /dev/null 2>&1 || fail 9006 "Туннель AmneziaWG не поднят: замер через него невозможен"
+            via=$AWG_IF
+            ;;
+        *) fail 9003 "Неверное значение: via (пусто или awg)" ;;
+    esac
+    if [ -n "$url" ]; then
+        case "$url" in http://*|https://*) ;; *) fail 9003 "Неверное значение: url (http:// или https://)" ;; esac
+        case "$url" in *[!A-Za-z0-9.:/_%?=\&+~-]*) fail 9003 "Неверное значение: url" ;; esac
+        sel=""
+    else
+        [ -n "$sel" ] || sel=auto
+        case "$sel" in
+            auto) ;;
+            *[!A-Za-z0-9_.-]*) fail 9003 "Неверное значение: server" ;;
+            *) speed_find "$sel" || fail 9006 "Не найдено: сервер $sel"
+               [ "$P_direction" = up ] && [ -z "$S_UP" ] && fail 9006 "Не найдено: у сервера $sel нет адреса отдачи"
+               ;;
+        esac
+    fi
+    speed_running && fail 9002 "Замер уже идет"
+    { x status running; x phase start; x server "$sel"; x url "$url"; } > "$RUN/speed.info"
+    speed_history_xml > "$RUN/speed.history.xml"
+    : > "$RUN/speed.series"
+    ( speed_measure "$sel" "$url" "$to" "$via" "$P_direction" "$streams" ) < /dev/null > /dev/null 2>&1 &
+    echo $! > "$RUN/speedtest.pid"
+    log "speedtest start ${sel:-$url}${via:+ через $via}"
+    x status running
+    x server "$sel"
+    x url "$url"
+    x direction "$P_direction"
+    x streams "$streams"
+    [ -n "$via" ] && x via awg || x via direct
+}
+
+# ---------- vpn ----------
+
+# ip из /system/bin (iproute2): busybox ip не знает "type wireguard"
+IP=/system/bin/ip
+
+# AmneziaWG — пакет awg: svc.sh start|stop|status|enable|disable|setconf
+AWG_PKG=${AWG_PKG:-/online/mod/pkg/awg}
+AWG_CONF=${AWG_CONF:-/online/mod/conf/awg/awg0.conf}
+AWG_IF=${AWG_IF:-awg0}
+AWG_PROFILES=${AWG_CONF%/*}/profiles
+
+# awg_svc ТАЙМАУТ КОМАНДА [АРГУМЕНТ…] — стандартный ввод из AWG_IN (по умолчанию /dev/null)
+awg_svc() {
+    local f=$AWG_PKG/svc.sh t=$1
+    shift
+    if [ -x "$f" ]; then
+        $B timeout -t "$t" "$f" "$@" < "${AWG_IN:-/dev/null}"
+    else
+        $B timeout -t "$t" $B sh "$f" "$@" < "${AWG_IN:-/dev/null}"
+    fi
+}
+
+# состояние AmneziaWG: только известные поля status, ключи не выводятся
+awg_state() {
+    local k v
+    AP_NAME=""; AP_LABEL=""
+    printf '<awg>'
+    if [ ! -f "$AWG_PKG/svc.sh" ]; then
+        x installed 0; x configured 0; x up 0; x autostart 0
+        printf '</awg>'
+        return 0
+    fi
+    x installed 1
+    if [ -s "$AWG_CONF" ] || [ -n "$($B ls "$AWG_PROFILES" 2>/dev/null | $B grep -m1 '\.conf$')" ]; then
+        x configured 1
+    else
+        x configured 0
+    fi
+    awg_svc 10 status > "$T/awg.st" 2>/dev/null
+    for k in running enabled info rx tx handshake dns dns_server profile profile_label engine engine_fallback \
+        split split_active split_list split_prefixes split_date split_reason split_hint failover failover_reason primary; do
+        v=$($B sed -n "s/^$k=//p" "$T/awg.st" | $B head -n1)
+        case "$k" in
+            running) [ "$v" = 1 ] && x up 1 || x up 0 ;;
+            enabled) [ "$v" = 1 ] && x autostart 1 || x autostart 0 ;;
+            rx) x rx_bytes "$v" ;;
+            tx) x tx_bytes "$v" ;;
+            handshake) x handshake_s "$v" ;;
+            # DNS клиентов LAN: tunnel — через туннель, operator — DNS оператора, dnspkg — пакет dns
+            dns) x dns_mode "$v" ;;
+            # активный профиль — ниже, вместе со списком (имя <profile> занято элементом списка)
+            profile) AP_NAME=$v ;;
+            profile_label) AP_LABEL=$v ;;
+            *) x "$k" "$v" ;;
+        esac
+    done
+    # пакет без раздельного VPN строку split= не печатает: списки не запрашиваются
+    if $B grep -q '^split=' "$T/awg.st"; then
+        awg_split_list direct split_direct
+        awg_split_list vpn split_vpn
+    fi
+    $B rm -f "$T/awg.st"
+    awg_profiles
+    x active_profile "$AP_NAME"
+    x active_label "$AP_LABEL"
+    printf '</awg>'
+}
+
+# awg_split_list direct|vpn ЭЛЕМЕНТ — свои исключения раздельного VPN: <ЭЛЕМЕНТ><addr>…</addr>…</ЭЛЕМЕНТ>
+awg_split_list() {
+    local l
+    printf '<%s>' "$2"
+    awg_svc 10 "split-$1" list 2>/dev/null | while read -r l; do
+        case "$l" in ''|*[!0-9./]*) continue ;; esac
+        x addr "$l"
+    done
+    printf '</%s>' "$2"
+}
+
+# Профили: "svc.sh profiles" печатает для каждого профиля строки name=, active=,
+# endpoint_host=, label=, proto= (без ключей). Пакет без профилей (код 2, «использование») — элемента <profiles> нет.
+awg_profiles() {
+    local l k v open=0 act="" actl="" PL=""
+    awg_svc 10 profiles > "$T/awg.pr" 2>/dev/null || { $B rm -f "$T/awg.pr"; return 0; }
+    printf '<profiles>'
+    while read -r l; do
+        k=${l%%=*}; v=${l#*=}
+        [ "$k" = "$l" ] && continue
+        case "$k" in
+            name)
+                [ $open = 1 ] && printf '</profile>'
+                printf '<profile>'; x name "$v"; open=1 ;;
+            active)
+                [ $open = 1 ] && x active "$v"
+                [ "$v" = 1 ] && { act=$PN; actl=$PL; } ;;
+            endpoint_host) [ $open = 1 ] && x endpoint_host "$v" ;;
+            # подпись, как ввел пользователь (UTF-8); x экранирует & < >
+            label) [ $open = 1 ] && x label "$v"; PL=$v ;;
+            # версия протокола AmneziaWG у профиля (2.0, 3.1, …)
+            proto) [ $open = 1 ] && x proto "$v" ;;
+        esac
+        [ "$k" = name ] && { PN=$v; PL=""; }
+    done < "$T/awg.pr"
+    [ $open = 1 ] && printf '</profile>'
+    printf '</profiles>'
+    # пакет без строк profile= в status — активный по списку
+    [ -n "$AP_NAME" ] || AP_NAME=$act
+    [ -n "$AP_LABEL" ] || AP_LABEL=$actl
+    $B rm -f "$T/awg.pr"
+}
+
+# check_profile_name — имя профиля AmneziaWG: a-z, 0-9, _ и -, 1–32 символа
+check_profile_name() {
+    case "$P_name" in ''|*[!a-z0-9_-]*) fail 9003 "Неверное значение: name (a-z, 0-9, _ и -, до 32 символов)" ;; esac
+    [ ${#P_name} -le 32 ] || fail 9003 "Неверное значение: name (длиннее 32 символов)"
+}
+
+# check_label — подпись профиля: UTF-8 до 64 символов, без перевода строк и управляющих символов
+check_label() {
+    local c chars=0
+    [ -n "$P_label" ] || fail 9003 "Неверное значение: label (пусто)"
+    # по байтам: управляющие (меньше 32 и 127) — нельзя; символов UTF-8 = байтов, кроме продолжений 128–191
+    set -f
+    for c in $(printf '%s' "$P_label" | $B od -v -An -tu1); do
+        if [ "$c" -lt 32 ] || [ "$c" -eq 127 ]; then
+            fail 9003 "Неверное значение: label (перевод строки или управляющие символы)"
+        fi
+        if [ "$c" -lt 128 ] || [ "$c" -gt 191 ]; then chars=$((chars + 1)); fi
+    done
+    set +f
+    [ "$chars" -le 64 ] || fail 9003 "Неверное значение: label (длиннее 64 символов)"
+}
+
+act_vpn_profile_label() {
+    check_vpn_type
+    [ "$P_type" = awg ] || fail 9003 "Неверное значение: type (профили есть только у awg)"
+    check_profile_name
+    check_label
+    need_awg
+    awg_has_profiles || fail 9004 "Пакет AmneziaWG не умеет работать с профилями (нет команды svc.sh profiles)"
+    local rc
+    awg_svc 30 label "$P_name" "$P_label" > "$T/out" 2>&1
+    rc=$?
+    log "vpn awg profile label $P_name rc=$rc"
+    [ "$rc" = 0 ] || fail 9004 "Пакет AmneziaWG не сменил подпись (код $rc)" "$T/out"
+    awg_state
+    awg_out "$T/out"
+}
+
+# профили есть у пакета (svc.sh profiles не отвечает «использование»)
+awg_has_profiles() { awg_svc 10 profiles > /dev/null 2>&1; }
+
+act_vpn_profile_use() {
+    check_vpn_type
+    [ "$P_type" = awg ] || fail 9003 "Неверное значение: type (профили есть только у awg)"
+    check_profile_name
+    need_awg
+    awg_has_profiles || fail 9004 "Пакет AmneziaWG не умеет работать с профилями (нет команды svc.sh profiles)"
+    local rc
+    awg_svc 60 use "$P_name" > "$T/out" 2>&1
+    rc=$?
+    log "vpn awg profile use $P_name rc=$rc"
+    [ "$rc" = 0 ] || fail 9004 "Пакет AmneziaWG не переключил профиль (код $rc)" "$T/out"
+    awg_state
+    awg_out "$T/out"
+}
+
+act_vpn_profile_delete() {
+    check_vpn_type
+    [ "$P_type" = awg ] || fail 9003 "Неверное значение: type (профили есть только у awg)"
+    check_profile_name
+    need_awg
+    awg_has_profiles || fail 9004 "Пакет AmneziaWG не умеет работать с профилями (нет команды svc.sh profiles)"
+    local rc
+    awg_svc 30 delete "$P_name" > "$T/out" 2>&1
+    rc=$?
+    log "vpn awg profile delete $P_name rc=$rc"
+    [ "$rc" = 0 ] || fail 9004 "Пакет AmneziaWG не удалил профиль (код $rc)" "$T/out"
+    awg_state
+    awg_out "$T/out"
+}
+
+# вывод команд пакета без строк с ключами
+awg_out() {
+    $B grep -v -i -e 'privatekey' -e 'presharedkey' "$1" > "$1.safe" 2>/dev/null
+    xfile output "$1.safe"
+    $B rm -f "$1.safe"
+}
+
+need_awg() {
+    [ -f "$AWG_PKG/svc.sh" ] || fail 9006 "Не найдено: пакет AmneziaWG ($AWG_PKG) не установлен"
+}
+
+wg_up() { $IP link show wg0 > /dev/null 2>&1; }
+ovpn_pid() {
+    local p
+    p=$($B cat "$RUN/ovpn.pid" 2>/dev/null)
+    is_uint "$p" && [ -d "/proc/$p" ] && $B grep -q openvpn "/proc/$p/cmdline" 2>/dev/null && echo "$p"
+}
+
+vpn_state() {
+    case "$1" in
+        wg)
+            printf '<wg>'
+            [ -s "$WG_CONF" ] && x configured 1 || x configured 0
+            wg_up && x up 1 || x up 0
+            [ -f "$VPN_DIR/wg.autostart" ] && x autostart 1 || x autostart 0
+            [ -f /etc/autorun.d/vpn.sh ] && x autostart_mod 1 || x autostart_mod 0
+            printf '</wg>'
+            ;;
+        ovpn)
+            printf '<ovpn>'
+            [ -s "$OVPN_CONF" ] && x configured 1 || x configured 0
+            [ -n "$(ovpn_pid)" ] && x up 1 || x up 0
+            [ -f "$VPN_DIR/ovpn.autostart" ] && x autostart 1 || x autostart 0
+            printf '</ovpn>'
+            ;;
+    esac
+}
+
+act_vpn_show() { vpn_state wg; vpn_state ovpn; awg_state; }
+
+check_vpn_type() {
+    case "$P_type" in wg|ovpn|awg) ;; *) fail 9003 "Неверное значение: type" ;; esac
+}
+
+vpn_conf() { [ "$P_type" = wg ] && echo "$WG_CONF" || echo "$OVPN_CONF"; }
+
+# тот же порядок, что VPN_ON_SCRIPT в hijacks/scripts/vpn.sh мода
+wg_start() {
+    [ -s "$WG_CONF" ] || fail 9006 "Не найдено: $WG_CONF"
+    {
+        insmod /system/modules/ip_tunnel.ko 2>/dev/null
+        insmod /system/modules/wireguard.ko 2>/dev/null
+        $IP link add dev wg0 type wireguard
+        /system/xbin/wg setconf wg0 "$WG_CONF"
+        $IP link set dev wg0 up
+        $IP route add default dev wg0 table 29500
+    } > "$T/out" 2>&1
+}
+
+ovpn_start() {
+    [ -s "$OVPN_CONF" ] || fail 9006 "Не найдено: $OVPN_CONF"
+    [ -n "$(ovpn_pid)" ] && return 0
+    [ -c /dev/net/tun ] || { $B mkdir -p /dev/net; $B mknod /dev/net/tun c 10 200; }
+    cd "$VPN_DIR" && /system/xbin/openvpn --config "$OVPN_CONF" --daemon modovpn \
+        --writepid "$RUN/ovpn.pid" --log "$RUN/ovpn.log" > "$T/out" 2>&1
+    $B sleep 2
+}
+
+act_vpn_start() {
+    check_vpn_type
+    if [ "$P_type" = awg ]; then
+        need_awg
+        awg_svc 60 start > "$T/out" 2>&1
+        log "vpn start awg rc=$?"
+        awg_state
+        awg_out "$T/out"
+        return 0
+    fi
+    if [ "$P_type" = wg ]; then wg_up || wg_start; else ovpn_start; fi
+    log "vpn start $P_type"
+    vpn_state "$P_type"
+    [ -f "$T/out" ] && xfile output "$T/out"
+}
+
+act_vpn_stop() {
+    check_vpn_type
+    local p
+    if [ "$P_type" = awg ]; then
+        need_awg
+        awg_svc 60 stop > "$T/out" 2>&1
+        log "vpn stop awg rc=$?"
+        awg_state
+        awg_out "$T/out"
+        return 0
+    fi
+    if [ "$P_type" = wg ]; then
+        $IP link del dev wg0 > "$T/out" 2>&1
+    else
+        p=$(ovpn_pid)
+        [ -n "$p" ] && kill "$p"
+        $B sleep 1
+        [ -n "$(ovpn_pid)" ] || $B rm -f "$RUN/ovpn.pid"
+    fi
+    log "vpn stop $P_type"
+    vpn_state "$P_type"
+}
+
+act_vpn_autostart() {
+    check_vpn_type
+    is_flag "$P_enable" || fail 9003 "Неверное значение: enable"
+    if [ "$P_type" = awg ]; then
+        need_awg
+        if [ "$P_enable" = 1 ]; then awg_svc 30 enable > "$T/out" 2>&1; else awg_svc 30 disable > "$T/out" 2>&1; fi
+        log "vpn autostart awg=$P_enable rc=$?"
+        awg_state
+        awg_out "$T/out"
+        return 0
+    fi
+    $B mkdir -p "$VPN_DIR"
+    if [ "$P_enable" = 1 ]; then : > "$VPN_DIR/$P_type.autostart"; else $B rm -f "$VPN_DIR/$P_type.autostart"; fi
+    log "vpn autostart $P_type=$P_enable"
+    vpn_state "$P_type"
+}
+
+act_vpn_config() {
+    check_vpn_type
+    local f
+    if [ "$P_type" = awg ]; then
+        # профиль: по имени, иначе активный, иначе одиночный awg0.conf
+        f=$AWG_CONF
+        [ -z "$P_name" ] && [ -f "${AWG_CONF%/*}/active" ] && read -r P_name < "${AWG_CONF%/*}/active"
+        if [ -n "$P_name" ]; then
+            check_profile_name
+            f=$AWG_PROFILES/$P_name.conf
+        fi
+        [ -f "$f" ] || fail 9006 "Не найдено: $f"
+        # ключи не отдаем: строки PrivateKey и PresharedKey заменены
+        $B sed -e 's/^\([[:space:]]*[Pp]rivate[Kk]ey[[:space:]]*=\).*/\1 (скрыт)/' \
+               -e 's/^\([[:space:]]*[Pp]reshared[Kk]ey[[:space:]]*=\).*/\1 (скрыт)/' "$f" > "$T/awg.conf"
+        x name "$P_name"
+        OUT_MAX=262144 xfile content "$T/awg.conf"
+        $B rm -f "$T/awg.conf"
+        return 0
+    fi
+    f=$(vpn_conf)
+    [ -f "$f" ] || fail 9006 "Не найдено: $f"
+    OUT_MAX=262144 xfile content "$f"
+}
+
+# vpn dns: DNS клиентов LAN через туннель AmneziaWG (svc.sh dns on|off), туннель не останавливается
+act_vpn_dns() {
+    check_vpn_type
+    [ "$P_type" = awg ] || fail 9003 "Неверное значение: type (dns есть только у awg)"
+    is_flag "$P_on" || fail 9003 "Неверное значение: on"
+    need_awg
+    local rc
+    if [ "$P_on" = 1 ]; then awg_svc 30 dns on > "$T/out" 2>&1; else awg_svc 30 dns off > "$T/out" 2>&1; fi
+    rc=$?
+    log "vpn dns awg on=$P_on rc=$rc"
+    [ "$rc" = 2 ] && fail 9004 "Пакет AmneziaWG не умеет переключать DNS (нет команды svc.sh dns)" "$T/out"
+    [ "$rc" = 0 ] || fail 9004 "Пакет AmneziaWG не переключил DNS (код $rc)" "$T/out"
+    awg_state
+    awg_out "$T/out"
+}
+
+# awg_do ТАЙМАУТ КОМАНДА [АРГУМЕНТ…] — команда пакета; ответ — состояние <awg>, отказ — 9004 с текстом пакета как есть
+awg_do() {
+    local rc t=$1
+    shift
+    need_awg
+    awg_svc "$t" "$@" > "$T/out" 2>&1
+    rc=$?
+    log "vpn $1 ${2:-} rc=$rc"
+    [ "$rc" = 0 ] || fail 9004 "$($B head -n1 "$T/out" | $B cut -c1-200)" "$T/out"
+    awg_state
+    awg_out "$T/out"
+}
+
+act_vpn_split() {
+    is_flag "$P_on" || fail 9003 "Неверное значение: on"
+    if [ "$P_on" = 1 ]; then awg_do 60 split on; else awg_do 60 split off; fi
+}
+
+# Список российских адресов: файл во временном каталоге запроса, проверку и замену делает пакет
+act_vpn_split_update() {
+    [ -s "$T/payload" ] || fail 9003 "Неверное значение: list_b64"
+    $B base64 -d < "$T/payload" > "$T/new" 2>"$T/b64err" || fail 9003 "Неверное значение: list_b64" "$T/b64err"
+    [ -s "$T/new" ] || fail 9003 "Неверное значение: list_b64"
+    $B rm -f "$T/payload"
+    awg_do 60 split-update "$T/new"
+    $B rm -f "$T/new"
+}
+
+# check_prefix_addr — адрес IPv4 или подсеть: только запись; длину и лишние биты проверяет пакет
+check_prefix_addr() {
+    local a=${P_addr%%/*} o IFS_OLD=$IFS
+    case "$P_addr" in
+        */*/*|*/) fail 9003 "Неверное значение: addr (IPv4 или подсеть, например 203.0.113.0/24)" ;;
+        */*) is_uint "${P_addr#*/}" && [ "${#P_addr}" -le 18 ] && [ "${P_addr#*/}" -le 32 ] \
+            || fail 9003 "Неверное значение: addr (IPv4 или подсеть, например 203.0.113.0/24)" ;;
+    esac
+    case "$a" in
+        *.*.*.*.*|*..*|.*|*.) fail 9003 "Неверное значение: addr (IPv4 или подсеть, например 203.0.113.0/24)" ;;
+        *.*.*.*) ;;
+        *) fail 9003 "Неверное значение: addr (IPv4 или подсеть, например 203.0.113.0/24)" ;;
+    esac
+    IFS=.
+    set -- $a
+    IFS=$IFS_OLD
+    for o in "$@"; do
+        is_uint "$o" && [ "${#o}" -le 3 ] && [ "$o" -le 255 ] \
+            || fail 9003 "Неверное значение: addr (IPv4 или подсеть, например 203.0.113.0/24)"
+    done
+}
+
+# split_ex direct|vpn — свои исключения
+split_ex() {
+    case "$P_op" in add|del) ;; *) fail 9003 "Неверное значение: op (add или del)" ;; esac
+    check_prefix_addr
+    awg_do 30 "split-$1" "$P_op" "$P_addr"
+}
+act_vpn_split_direct() { split_ex direct; }
+act_vpn_split_vpn() { split_ex vpn; }
+
+act_vpn_failover() {
+    is_flag "$P_on" || fail 9003 "Неверное значение: on"
+    if [ "$P_on" = 0 ]; then
+        awg_do 30 failover off
+    elif [ -n "$P_primary" ]; then
+        P_name=$P_primary
+        check_profile_name
+        awg_do 30 failover on "$P_primary"
+    else
+        awg_do 30 failover on
+    fi
+}
+
+# setconf — то же, что save (другое имя того же действия)
+act_vpn_setconf() { act_vpn_save; }
+
+act_vpn_save() {
+    check_vpn_type
+    local f rc
+    if [ "$P_type" = awg ]; then
+        need_awg
+        # имя профиля обязательно; пакет без профилей получает конфиг без имени
+        check_profile_name
+        [ -n "$P_label" ] && check_label
+        $B base64 -d < "$T/payload" > "$T/new" 2>"$T/b64err" || fail 9003 "Неверное значение: content_b64" "$T/b64err"
+        [ "$($B wc -c < "$T/new")" -le 65536 ] || fail 9003 "Конфиг больше 64 КБ"
+        AWG_IN="$T/new"
+        if ! awg_has_profiles; then
+            awg_svc 30 setconf > "$T/out" 2>&1
+        elif [ -n "$P_label" ]; then
+            awg_svc 30 setconf "$P_name" "$P_label" > "$T/out" 2>&1
+        else
+            awg_svc 30 setconf "$P_name" > "$T/out" 2>&1
+        fi
+        rc=$?
+        AWG_IN=""
+        $B rm -f "$T/new" "$T/payload"
+        log "vpn save awg ${P_name} rc=$rc"
+        if [ "$rc" != 0 ]; then
+            $B grep -v -i -e 'privatekey' -e 'presharedkey' "$T/out" > "$T/out.safe"
+            fail 9004 "Пакет AmneziaWG не принял конфиг (код $rc)" "$T/out.safe"
+        fi
+        awg_state
+        awg_out "$T/out"
+        return 0
+    fi
+    f=$(vpn_conf)
+    $B base64 -d < "$T/payload" > "$T/new" 2>"$T/b64err" || fail 9003 "Неверное значение: content_b64" "$T/b64err"
+    [ "$($B wc -c < "$T/new")" -le 65536 ] || fail 9003 "Конфиг больше 64 КБ"
+    $B mkdir -p "$VPN_DIR"
+    $B cp "$T/new" "$f.tmp" && $B chmod 600 "$f.tmp" && $B mv -f "$f.tmp" "$f" || fail 9004 "Не удалось записать $f"
+    log "vpn save $P_type"
+    vpn_state "$P_type"
+}
+
+# ---------- svc (пакеты: /online/mod/pkg/<имя>/svc.sh start|stop|status|enable|disable) ----------
+
+check_pkg_name() {
+    case "$P_name" in ''|.*|*[!A-Za-z0-9_.-]*) fail 9003 "Неверное значение: name" ;; esac
+    [ -f "$PKG/$P_name/svc.sh" ] || fail 9006 "Не найдено: $P_name"
+}
+
+# svc_exec ТАЙМАУТ ИМЯ КОМАНДА
+# svc.sh start должен сам отвязать демон от вывода (свой журнал или /dev/null)
+svc_exec() {
+    local f=$PKG/$2/svc.sh t=$1
+    shift 2
+    if [ -x "$f" ]; then
+        $B timeout -t "$t" "$f" "$@" < /dev/null
+    else
+        $B timeout -t "$t" $B sh "$f" "$@" < /dev/null
+    fi
+}
+
+# svc_state ИМЯ — <running>, <enabled>, <info> по выводу "svc.sh status" (строки running=, enabled=, info=)
+svc_state() {
+    local rc r e
+    svc_exec 10 "$1" status > "$T/st" 2>&1
+    rc=$?
+    r=$($B sed -n 's/^running=\([01]\).*/\1/p' "$T/st" | $B head -n1)
+    e=$($B sed -n 's/^enabled=\([01]\).*/\1/p' "$T/st" | $B head -n1)
+    [ -n "$r" ] || { [ $rc = 0 ] && r=1 || r=0; }
+    [ -n "$e" ] || e=0
+    x running "$r"; x enabled "$e"
+    x info "$($B sed -n 's/^info=//p' "$T/st" | $B head -n1)"
+    [ "$1" = dns ] && svc_dns_fields
+}
+
+# Адрес своего сервера DNS из настроек пакета. Участки пути DoH перед dns-query могут быть личным ключом: вместо них «…»
+svc_dns_custom_addr() {
+    local a r h
+    a=$($B sed -n 's/^CUSTOM_DNS="\(.*\)"$/\1/p' "${DNS_SETTINGS:-/online/mod/conf/dns/settings}" 2>/dev/null | $B head -n1)
+    case "$a" in
+        https://*/dns-query)
+            r=${a#https://}; h=${r%%/*}
+            [ "${r#*/}" = dns-query ] || a="https://$h/…/dns-query"
+            ;;
+    esac
+    printf '%s' "$a"
+}
+
+# Пакет dns: выбор сервера и блокировка рекламы (строки preset=, preset_label=, adblock= из status — в $T/st)
+svc_dns_fields() {
+    local k l id label act
+    for k in preset preset_label adblock dns_fallback dns_upstream user_off last_error; do
+        x "$k" "$($B sed -n "s/^$k=//p" "$T/st" | $B head -n1)"
+    done
+    # рекомендуемый — на него указывает auto (6-е поле presets.txt)
+    x custom_addr "$(svc_dns_custom_addr)"
+    x recommended "$($B awk -F'|' '!/^#/ && NF >= 6 && $6 == "1" {print $1; exit}' "$PKG/dns/presets.txt" 2>/dev/null)"
+    svc_exec 10 dns presets > "$T/pr" 2>/dev/null || return 0
+    printf '<presets>'
+    while IFS='|' read -r id label act; do
+        case "$id" in ''|*[!a-z0-9_-]*) continue ;; esac
+        printf '<dns_preset>'; x id "$id"; x label "$label"; x active "${act:-0}"; printf '</dns_preset>'
+    done < "$T/pr"
+    printf '</presets>'
+    $B rm -f "$T/pr"
+}
+
+# svc_dns_do КОМАНДА [АРГУМЕНТ] — команда пакета dns; ошибка — текстом пакета как есть, служба сама не стартует
+svc_dns_do() {
+    local rc
+    [ -f "$PKG/dns/svc.sh" ] || fail 9006 "Не найдено: пакет dns"
+    svc_exec 30 dns "$@" > "$T/out" 2>&1
+    rc=$?
+    log "svc dns $1 ${2:-} rc=$rc"
+    if [ "$rc" != 0 ]; then
+        fail 9004 "$($B head -n1 "$T/out" | $B cut -c1-200)" "$T/out"
+    fi
+    P_name=dns
+    x name dns
+    svc_state dns
+    xfile output "$T/out"
+}
+
+act_svc_dns_preset() {
+    case "$P_id" in ''|*[!a-z0-9_-]*) fail 9003 "Неверное значение: id" ;; esac
+    [ ${#P_id} -le 32 ] || fail 9003 "Неверное значение: id"
+    svc_dns_do use-preset "$P_id"
+}
+
+act_svc_dns_custom() {
+    # адрес уходит в файл настроек пакета: только символы адреса
+    case "$P_addr" in ''|*[!A-Za-z0-9.:/_-]*) fail 9003 "Неверное значение: addr (https://сервер/dns-query, tls://имя или IPv4)" ;; esac
+    [ ${#P_addr} -le 200 ] || fail 9003 "Неверное значение: addr (длиннее 200 символов)"
+    svc_dns_do set-custom "$P_addr"
+}
+
+# Служба DNS: автозапуск поднимает ее снова, пока включен, поэтому включение и выключение идут парой команд пакета.
+# dns_do_pair КОМАНДА КОМАНДА — вторая выполняется и при отказе первой; отказ — 9004 с текстом пакета как есть
+dns_do_pair() {
+    local rc1 rc2 msg=""
+    [ -f "$PKG/dns/svc.sh" ] || fail 9006 "Не найдено: пакет dns"
+    svc_exec 30 dns "$1" > "$T/out1" 2>&1
+    rc1=$?
+    svc_exec 60 dns "$2" > "$T/out2" 2>&1
+    rc2=$?
+    log "svc dns $1 rc=$rc1, $2 rc=$rc2"
+    $B cat "$T/out1" "$T/out2" > "$T/out"
+    [ "$rc2" = 0 ] || msg=$($B head -n1 "$T/out2" | $B cut -c1-200)
+    [ "$rc1" = 0 ] || msg=$($B head -n1 "$T/out1" | $B cut -c1-200)
+    if [ "$rc1" != 0 ] || [ "$rc2" != 0 ]; then
+        fail 9004 "${msg:-Пакет dns не выполнил команду}" "$T/out"
+    fi
+    x name dns
+    svc_state dns
+    xfile output "$T/out"
+}
+act_svc_dns_enable() { dns_do_pair enable start; }
+act_svc_dns_disable() { dns_do_pair stop disable; }
+
+act_svc_dns_adblock() {
+    is_flag "$P_on" || fail 9003 "Неверное значение: on"
+    if [ "$P_on" = 1 ]; then svc_dns_do adblock on; else svc_dns_do adblock off; fi
+}
+
+act_svc_show() {
+    local d n
+    printf '<services>'
+    for d in "$PKG"/*; do
+        [ -f "$d/svc.sh" ] || continue
+        n=${d##*/}
+        printf '<service>'; x name "$n"; x desc "$($B head -n1 "$d/desc" 2>/dev/null)"
+        svc_state "$n"
+        printf '</service>'
+    done
+    printf '</services>'
+}
+
+svc_do() {
+    check_pkg_name
+    svc_exec 60 "$P_name" "$1" > "$T/out" 2>&1
+    local rc=$?
+    log "svc $P_name $1 rc=$rc"
+    x name "$P_name"
+    x rc "$rc"
+    svc_state "$P_name"
+    xfile output "$T/out"
+}
+
+act_svc_start() { svc_do start; }
+act_svc_stop() { svc_do stop; }
+act_svc_enable() { svc_do enable; }
+act_svc_disable() { svc_do disable; }
+act_svc_status() { svc_do status; }
+
+# ---------- logs ----------
+
+act_logs_show() {
+    printf '<logs>'
+    printf '<log>'; x id dmesg; x title "Ядро"; printf '</log>'
+    printf '<log>'; x id helper; x title "Помощник"; printf '</log>'
+    printf '<log>'; x id scripts; x title "Скрипты"; printf '</log>'
+    printf '<log>'; x id ovpn; x title "OpenVPN"; printf '</log>'
+    printf '<log>'; x id logcat; x title "Android logcat"; printf '</log>'
+    printf '</logs>'
+}
+
+act_logs_get() {
+    local n=${P_lines:-200}
+    is_uint "$n" && [ "$n" -ge 1 ] && [ "$n" -le 2000 ] || fail 9003 "Неверное значение: lines"
+    case "$P_id" in
+        dmesg) $B dmesg | $B tail -n "$n" > "$T/out" ;;
+        helper) $B cat "$LOG.1" "$LOG" 2>/dev/null | $B tail -n "$n" > "$T/out" ;;
+        scripts) $B cat "$SLOG.1" "$SLOG" 2>/dev/null | $B tail -n "$n" > "$T/out" ;;
+        ovpn) $B tail -n "$n" "$RUN/ovpn.log" > "$T/out" 2>/dev/null ;;
+        logcat) $B timeout -t 10 /system/bin/logcat -d -v time 2>/dev/null | $B tail -n "$n" > "$T/out" ;;
+        *) fail 9003 "Неверное значение: id" ;;
+    esac
+    x id "$P_id"
+    OUT_MAX=262144 xfile output "$T/out"
+}
+
+# ---------- radio: режим сети и диапазоны LTE (AT^SYSCFGEX) ----------
+
+# диапазоны LTE роутера (маска 0x20880800C5)
+LTE_BANDS='1 3 7 8 20 28 32 38'
+
+act_radio_show() {
+    local b m
+    at_run 'AT^SYSCFGEX?'
+    IFS=, ; set -- $(at_field_line '^SYSCFGEX'); IFS=$OIFS
+    x mode "$1"
+    x lte_mask "$5"
+    printf '<lte_bands>'
+    case "$5" in
+        ''|*[!0-9A-Fa-f]*) ;;
+        *)
+            m=$((0x$5))
+            for b in $LTE_BANDS; do
+                printf '<band>'; x num "$b"; x on $(((m >> (b - 1)) & 1)); printf '</band>'
+            done
+            ;;
+    esac
+    printf '</lte_bands>'
+    xfile output "$T/at"
+}
+
+act_radio_set() {
+    local mode=$P_mode mask b ok
+    case "$mode" in ''|00|01|02|03|0302|0301|0201) ;; *) fail 9003 "Неверное значение: mode" ;; esac
+    if [ -n "$P_bands" ]; then
+        mask=0
+        for b in $(echo "$P_bands" | $B tr ',' ' '); do
+            ok=0
+            for c in $LTE_BANDS; do [ "$b" = "$c" ] && ok=1; done
+            [ $ok = 1 ] || fail 9003 "Неверное значение: bands (нет диапазона $b)"
+            mask=$((mask | (1 << (b - 1))))
+        done
+        [ "$mask" -ne 0 ] || fail 9003 "Неверное значение: bands"
+        mask=$(printf '%X' "$mask")
+    fi
+    [ -n "$mode" ] || [ -n "$mask" ] || fail 9003 "Нужно поле mode или bands"
+    need_modem_write
+    at_run 'AT^SYSCFGEX?'
+    IFS=, ; set -- $(at_field_line '^SYSCFGEX'); IFS=$OIFS
+    [ $# -ge 5 ] || fail 9004 "Не удалось прочитать текущие настройки" "$T/at"
+    # остальные поля — как сейчас
+    at_run "AT^SYSCFGEX=\"${mode:-$1}\",$2,$3,$4,${mask:-$5},,"
+    log "radio mode=${mode:-$1} lte=${mask:-$5}"
+    at_ok || fail 9004 "Модем ответил ошибкой" "$T/at"
+    act_radio_show
+}
+
+# ---------- battery (no_battery_mode.sh мода, NV 50364) ----------
+
+act_battery_show() {
+    $B timeout -t 10 "$NVTOOL" -d 50364 > "$T/nv" 2>&1
+    if $B grep -q '00 00 00 00' "$T/nv"; then x nobattery 0; else x nobattery 1; fi
+}
+
+act_battery_set() {
+    is_flag "$P_nobattery" || fail 9003 "Неверное значение: nobattery"
+    need_nv_write
+    log "nv 50364 nobattery=$P_nobattery"
+    $B timeout -t 15 "$NVTOOL" -m "50364:0$P_nobattery:00:00:00" > "$T/out" 2>&1
+    act_battery_show
+    x reboot_needed 1
+}
+
+# ---------- разбор запроса ----------
+
+A=""
+P_name=""; P_args=""; P_timeout_s=""; P_enable=""; P_disable=""; P_cmd=""; P_country=""
+P_url=""; P_type=""; P_id=""; P_lines=""; P_pci=""; P_earfcn=""; P_mode=""; P_nobattery=""
+P_bg=""; P_job=""; P_bands=""; P_server=""; P_number=""; P_source=""; P_on=""; P_via=""; P_label=""; P_direction=""; P_streams=""; P_op=""; P_primary=""; P_modem_write=""; P_nv_write=""; P_addr=""
+
+dec() {
+    case "$1" in
+        *[%+]*) DV=$($B httpd -d "$1") ;;
+        *) DV=$1 ;;
+    esac
+}
+
+parse_query() {
+    local kv k v IFS='&'
+    set -f
+    for kv in $QUERY_STRING; do
+        k=${kv%%=*}
+        v=${kv#*=}
+        [ "$k" = "$kv" ] && v=""
+        dec "$v"
+        case "$k" in
+            a) A=$DV ;;
+            name) P_name=$DV ;;
+            args) P_args=$DV ;;
+            timeout_s) P_timeout_s=$DV ;;
+            enable) P_enable=$DV ;;
+            disable) P_disable=$DV ;;
+            cmd) P_cmd=$DV ;;
+            country) P_country=$DV ;;
+            url) P_url=$DV ;;
+            type) P_type=$DV ;;
+            id) P_id=$DV ;;
+            lines) P_lines=$DV ;;
+            pci) P_pci=$DV ;;
+            earfcn) P_earfcn=$DV ;;
+            mode) P_mode=$DV ;;
+            nobattery) P_nobattery=$DV ;;
+            bg) P_bg=$DV ;;
+            job) P_job=$DV ;;
+            bands) P_bands=$DV ;;
+            server) P_server=$DV ;;
+            number) P_number=$DV ;;
+            on) P_on=$DV ;;
+            via) P_via=$DV ;;
+            label) P_label=$DV ;;
+            direction) P_direction=$DV ;;
+            streams) P_streams=$DV ;;
+            addr) P_addr=$DV ;;
+            op) P_op=$DV ;;
+            primary) P_primary=$DV ;;
+            modem_write) P_modem_write=$DV ;;
+            nv_write) P_nv_write=$DV ;;
+            source) P_source=$DV ;;
+        esac
+    done
+    set +f
+}
+
+reply_error() {
+    printf 'Content-Type: text/plain\r\n\r\n'
+    printf 'S %s\n%s\n' "$1" "$2"
+}
+
+dispatch() {
+    case "$A" in
+        helper.show|helper.set|sysinfo.show|signal.show|\
+        cell.show|cell.set|cell.clear|\
+        ttl.show|ttl.set|spe.show|spe.set|\
+        scripts.show|scripts.run|scripts.result|scripts.read|scripts.save|scripts.delete|scripts.autorun|\
+        at.show|at.send|wificountry.show|wificountry.set|lanname.resolve|\
+        msisdn.show|msisdn.set|msisdn.parse|msisdn.query|msisdn.auto|msisdn.sms|\
+        speedtest.show|speedtest.run|speedtest.servers|\
+        vpn.show|vpn.start|vpn.stop|vpn.autostart|vpn.config|vpn.save|vpn.setconf|vpn.dns|\
+        vpn.profile_use|vpn.profile_delete|vpn.profile_label|\
+        vpn.split|vpn.split_update|vpn.split_direct|vpn.split_vpn|vpn.failover|\
+        svc.show|svc.start|svc.stop|svc.enable|svc.disable|svc.status|svc.dns_preset|svc.dns_custom|svc.dns_adblock|svc.dns_enable|svc.dns_disable|\
+        logs.show|logs.get|radio.show|radio.set|battery.show|battery.set)
+            FN=act_$(echo "$A" | $B tr . _)
+            ;;
+        *)
+            reply_error 9009 "Неизвестное действие: $A"
+            return 1
+            ;;
+    esac
+}
+
+# ---------- главная часть ----------
+
+[ "$REQUEST_METHOD" = POST ] || { reply_error 9002 "Действие запрещено"; cleanup; exit 0; }
+case "$REMOTE_ADDR" in
+    127.0.0.1|::1|::ffff:127.0.0.1) ;;
+    *) reply_error 9002 "Действие запрещено"; cleanup; exit 0 ;;
+esac
+
+LEN=${CONTENT_LENGTH:-0}
+is_uint "$LEN" && [ "$LEN" -le 400000 ] || { reply_error 9003 "Слишком большой запрос"; cleanup; exit 0; }
+$B head -c "$LEN" > "$T/body"
+read -r SECRET_IN < "$T/body"
+SECRET=$($B cat "$H/secret" 2>/dev/null)
+if [ -z "$SECRET" ] || [ "$SECRET_IN" != "$SECRET" ]; then
+    A=auth; log "bad secret from $REMOTE_ADDR"
+    reply_error 9002 "Действие запрещено"
+    cleanup
+    exit 0
+fi
+$B tail -c +$((${#SECRET_IN} + 2)) "$T/body" > "$T/payload"
+
+parse_query
+dispatch || { cleanup; exit 0; }
+
+( "$FN" ) > "$T/resp" 2> "$T/stderr" < /dev/null
+
+printf 'Content-Type: text/plain\r\n\r\n'
+if [ -f "$T/err_code" ]; then
+    printf 'S %s\n' "$($B cat "$T/err_code")"
+    $B cat "$T/err_msg"
+    [ -f "$T/err_out" ] && $B cat "$T/err_out"
+    log "err $($B cat "$T/err_code")"
+else
+    printf 'S 0\n'
+    $B cat "$T/resp"
+fi
+cleanup
+exit 0

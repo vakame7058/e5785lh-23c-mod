@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response>
+<Networks>
+<Network><Index>0</Index><State>2</State><FullName>Operator A</FullName><ShortName>Op A</ShortName><Numeric>00101</Numeric><Rat>7</Rat></Network>
+<Network><Index>1</Index><State>1</State><FullName>Operator B</FullName><ShortName>Op B</ShortName><Numeric>00102</Numeric><Rat>7</Rat></Network>
+<Network><Index>2</Index><State>3</State><FullName>Operator C</FullName><ShortName>Op C</ShortName><Numeric>00103</Numeric><Rat>2</Rat></Network>
+</Networks>
+</response>

@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response><status>ok</status><server>selectel</server><name>Selectel</name><url>http://speedtest.selectel.ru/10MB</url><ip>188.93.16.19</ip><bytes>10485760</bytes><seconds>7</seconds><speed_kbps>12480</speed_kbps><time>1761745200</time><output></output><samples><s><t>1</t><cpu_pct>81</cpu_pct><kbps>10200</kbps></s><s><t>2</t><cpu_pct>93</cpu_pct><kbps>12900</kbps></s></samples></response>

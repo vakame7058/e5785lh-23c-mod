@@ -1,0 +1,34 @@
+#!/system/bin/busyboxx sh
+# Клиент очереди помощника (запускается от uid 1000 обработчиками Lua через io.popen).
+#   hc ID ТАЙМАУТ_С
+# Запрос уже лежит в /var/modq/ID.req (см. qd). Печатает ответ помощника.
+
+B=/system/bin/busyboxx
+Q=/var/modq
+id=$1
+to=$2
+
+case "$id" in ''|*[!A-Za-z0-9_]*) echo "S 9001"; echo "Неверный запрос"; exit 0 ;; esac
+case "$to" in ''|*[!0-9]*) to=30 ;; esac
+
+if [ ! -p "$Q/in" ]; then
+    $B rm -f "$Q/$id.req"
+    printf 'S 9001\nПомощник не запущен или не отвечает\n'
+    exit 0
+fi
+
+$B mkfifo -m 600 "$Q/$id.resp" 2> /dev/null || { $B rm -f "$Q/$id.req"; printf 'S 9001\nНет записи в %s\n' "$Q"; exit 0; }
+if ! $B timeout -t 2 $B sh -c 'echo "$1" > "$2"' hc "$id" "$Q/in"; then
+    $B rm -f "$Q/$id.req" "$Q/$id.resp"
+    printf 'S 9001\nПомощник не запущен или не отвечает\n'
+    exit 0
+fi
+$B timeout -t "$to" $B cat "$Q/$id.resp" > "$Q/$id.out"
+rc=$?
+$B rm -f "$Q/$id.resp" "$Q/$id.req"
+if [ -s "$Q/$id.out" ]; then
+    $B cat "$Q/$id.out"
+else
+    [ "$rc" = 143 ] && printf 'S 9005\nПомощник не ответил за %s с\n' "$to" || printf 'S 9001\nПомощник не ответил\n'
+fi
+$B rm -f "$Q/$id.out"

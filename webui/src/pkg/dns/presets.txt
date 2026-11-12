@@ -1,0 +1,19 @@
+# Пресеты DNS пакета dns. Проверено с роутера E5785Lh-23c, Tele2 LTE, напрямую мимо VPN: 2026-10-30.
+# Проверка: DoT, DoH или обычный DNS; имя в сертификате; настоящие адреса для www.instagram.com, rutracker.org, www.linkedin.com.
+# Формат: id|подпись|протокол|сервер(ы)|tls-имя|рекомендуемый(0/1)
+# Протокол: dot, doh, operator (DNS оператора), custom (свой адрес из CUSTOM_DNS).
+# Обычного DNS (порт 53) в списке нет намеренно: оператор перехватывает запросы к 8.8.8.8 и 1.1.1.1 и отвечает NXDOMAIN на заблокированные домены.
+# DNS оператора без шифрования, на заблокированные домены отдает 127.0.0.2 или ошибку.
+# Серверы через запятую.
+cloudflare-dot|Cloudflare (DoT)|dot|1.1.1.1,1.0.0.1|one.one.one.one|1
+cloudflare-doh|Cloudflare (DoH)|doh|1.1.1.1,1.0.0.1|cloudflare-dns.com|0
+quad9-dot|Quad9 (DoT)|dot|9.9.9.9,149.112.112.112|dns.quad9.net|0
+quad9-doh|Quad9 (DoH)|doh|9.9.9.9,149.112.112.112|dns.quad9.net|0
+google-dot|Google (DoT)|dot|8.8.8.8,8.8.4.4|dns.google|0
+google-doh|Google (DoH)|doh|8.8.8.8,8.8.4.4|dns.google|0
+yandex-dot|Яндекс (DoT)|dot|77.88.8.8|common.dot.dns.yandex.net|0
+yandex-doh|Яндекс (DoH)|doh|77.88.8.8|common.dot.dns.yandex.net|0
+adguard-dot|AdGuard, с блокировкой рекламы (DoT)|dot|94.140.14.14,94.140.15.15|dns.adguard-dns.com|0
+adguard-doh|AdGuard, с блокировкой рекламы (DoH)|doh|94.140.14.14,94.140.15.15|dns.adguard-dns.com|0
+operator|DNS оператора (подменяет ответы)|operator|-|-|0
+custom|Свой сервер|custom|-|-|0

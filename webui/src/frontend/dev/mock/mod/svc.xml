@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response><services>
+<service><name>tpws</name><desc>Обход DPI (tpws)</desc><running>1</running><enabled>1</enabled></service>
+<service><name>zapret2</name><desc>Обход DPI (nfqws2)</desc><running>0</running><enabled>0</enabled></service>
+<service><name>dns</name><desc>DNS: блокировка рекламы</desc><running>0</running><enabled>0</enabled></service>
+</services></response>

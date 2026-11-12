@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response><output>[    0.000000] Booting Linux on physical CPU 0x0
+[    0.000000] Linux version 3.10.100 (root@localhost) (gcc version 4.9) #1 SMP PREEMPT
+[    2.410000] yaffs: dev is 31 name is "mtdblock25" rw
+[   12.900000] wireguard: WireGuard 0.0.20181119 loaded
+</output></response>

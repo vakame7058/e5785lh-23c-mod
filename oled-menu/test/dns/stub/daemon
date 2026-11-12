@@ -1,0 +1,6 @@
+#!/bin/sh
+# заглушка dnsmasq/smartdns: фоновый процесс с pid-файлом, как настоящий
+if [ "$1" = run ]; then echo $$ > "$2"; while :; do sleep 1; done; fi
+n=$(basename "$0"); [ -f /tmp/fail_$n ] && { echo "$n: не удалось открыть порт" >&2; exit 1; }
+"$0" run "/tmp/mod/dns/$n.pid" >/dev/null 2>&1 </dev/null &
+exit 0

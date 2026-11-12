@@ -1,0 +1,45 @@
+#!/system/bin/busyboxx sh
+# Очередь помощника (root). Веб (uid 1000) не может открыть TCP-сокет (Android: нет группы inet),
+# поэтому запросы идут через каталог /var/modq:
+#   1. клиент пишет /var/modq/<id>.req: первая строка — query string, вторая — секрет, дальше — данные;
+#   2. клиент создает FIFO /var/modq/<id>.resp и пишет "<id>" в FIFO /var/modq/in;
+#   3. qd выполняет www/cgi-bin/h как CGI и пишет ответ в <id>.resp.
+# Запускает start.sh.
+
+B=/system/bin/busyboxx
+H=/online/mod/helper
+Q=/var/modq
+RUN=/var/modhelper
+
+export PATH=/system/bin:/system/xbin:/app/bin:/sbin:/bin
+umask 077
+
+handle() {
+    local id=$1 r=$Q/$1.req o=$Q/$1.resp t=$RUN/q.$1 q n
+    [ -f "$r" ] && [ ! -L "$r" ] || return 0
+    [ -p "$o" ] && [ ! -L "$o" ] || { $B rm -f "$r"; return 0; }
+    $B mkdir -p "$t" || return 0
+    read -r q < "$r"
+    $B tail -n +2 "$r" > "$t/body"
+    $B rm -f "$r"
+    n=$($B wc -c < "$t/body")
+    REQUEST_METHOD=POST REMOTE_ADDR=127.0.0.1 QUERY_STRING="$q" CONTENT_LENGTH=$n \
+        $B timeout -t 900 $B sh "$H/www/cgi-bin/h" < "$t/body" > "$t/out" 2> /dev/null
+    # клиент мог уйти по таймауту: тогда открытие FIFO на запись зависнет — ограничиваем
+    $B timeout -t 5 $B sh -c 'cat "$1" > "$2"' qd "$t/out" "$o"
+    $B rm -rf "$t"
+}
+
+$B mkdir -p "$Q" "$RUN"
+$B chown 0:1000 "$Q"
+$B chmod 770 "$Q"
+$B rm -f "$Q"/*
+$B mkfifo -m 620 "$Q/in"
+$B chown 0:1000 "$Q/in"
+
+exec 3<> "$Q/in"
+while read -r id <&3; do
+    case "$id" in ''|*[!A-Za-z0-9_]*) continue ;; esac
+    # двойной fork: обработчик уходит к init, зомби в qd не копятся
+    ( handle "$id" < /dev/null > /dev/null 2>&1 & )
+done

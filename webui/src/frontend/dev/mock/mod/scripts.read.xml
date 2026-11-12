@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response><content>#!/bin/sh
+# пример скрипта
+echo "Привет от роутера"
+uptime
+</content></response>

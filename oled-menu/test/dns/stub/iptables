@@ -1,0 +1,3 @@
+#!/bin/sh
+case "$*" in *" -S "*|*" -S") echo "-N MOD_DNS"; echo "-j MOD_DNS"; echo "REDIRECT";; esac
+exit 0

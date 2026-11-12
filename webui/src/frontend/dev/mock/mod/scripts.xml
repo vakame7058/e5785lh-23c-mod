@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response><scripts>
+<script><name>example.sh</name><size>320</size><mtime>1761740000</mtime><autorun>0</autorun></script>
+<script><name>VPN.sh</name><size>1840</size><mtime>1761700000</mtime><autorun>0</autorun></script>
+<script><name>ping_watch.sh</name><size>612</size><mtime>1761745000</mtime><autorun>1</autorun></script>
+</scripts></response>

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response>
+<AccessList>
+<Access>00</Access>
+<Access>01</Access>
+<Access>02</Access>
+<Access>03</Access>
+</AccessList>
+<BandList>
+<Band><Name>GSM900/GSM1800/WCDMA BCVIII/WCDMA BCI</Name><Value>2000000400380</Value></Band>
+</BandList>
+<LTEBandList>
+<LTEBand><Name>LTE BC1/LTE BC3/LTE BC7/LTE BC8/LTE BC20/LTE BC28/LTE BC32/LTE BC38</Name><Value>20880800C5</Value></LTEBand>
+<LTEBand><Name>LTE ALL</Name><Value>7FFFFFFFFFFFFFFF</Value></LTEBand>
+</LTEBandList>
+</response>

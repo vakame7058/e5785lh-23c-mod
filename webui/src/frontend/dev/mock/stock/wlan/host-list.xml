@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response>
+<Hosts>
+<Host><ID>1</ID><MacAddress>00:11:22:33:44:01</MacAddress><IpAddress>192.168.1.101</IpAddress><HostName>laptop</HostName><AssociatedTime>5321</AssociatedTime><AssociatedSsid>HUAWEI-1A2B</AssociatedSsid><Active>1</Active></Host>
+<Host><ID>2</ID><MacAddress>00:11:22:33:44:02</MacAddress><IpAddress>192.168.1.117</IpAddress><HostName>phone</HostName><AssociatedTime>812</AssociatedTime><AssociatedSsid>HUAWEI-1A2B</AssociatedSsid><Active>1</Active></Host>
+<Host><ID>3</ID><MacAddress>00:11:22:33:44:03</MacAddress><IpAddress>192.168.1.142</IpAddress><HostName></HostName><AssociatedTime>61</AssociatedTime><AssociatedSsid>HUAWEI-1A2B</AssociatedSsid><Active>1</Active></Host>
+</Hosts>
+</response>

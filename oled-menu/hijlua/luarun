@@ -1,0 +1,3 @@
+#!/system/bin/busybox sh
+# luarun: запуск hijlua с библиотеками /app/lib (Lua и модуль dm), скрипт из stdin
+LD_LIBRARY_PATH="/app/lib:/system/lib" exec /app/hijacks/bin/hijlua "$@"

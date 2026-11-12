@@ -1,0 +1,13 @@
+# Сборка панели
+src/frontend/dist/
+__pycache__/
+# Бинарники пакетов: кладет src/pkg/get-bins.sh
+src/pkg/*/bin/
+src/pkg/zapret2/lua/
+src/pkg/.dl/
+src/pkg/awg/amneziawg.ko
+# Сборка из исходников
+build/out/
+build/work/
+# Запас случайности: только на роутере
+random-seed*

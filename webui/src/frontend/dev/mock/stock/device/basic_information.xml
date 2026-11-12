@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response>
+<productfamily>LTE</productfamily>
+<classify>DataCard</classify>
+<multimode>0</multimode>
+<restore_default_status>0</restore_default_status>
+<sim_save_pin_enable>0</sim_save_pin_enable>
+<devicename></devicename>
+<SoftwareVersion>21.191.63.02.00</SoftwareVersion>
+<WebUIVersion>00.00.00.000.03</WebUIVersion>
+</response>

@@ -1,0 +1,73 @@
+# check_so.sh и collide.sh по итоговым ELF-файлам набора r10
+== install/files/hijacks/lib/oled_hijack.so
+NEEDED: [libdl.so] [libc.so] 
+  tag HASH: есть
+  tag GNU_HASH: есть
+  tag TEXTREL: нет
+  tag RUNPATH: нет
+  tag RPATH: нет
+  tag RELR: нет
+  tag ANDROID_REL: нет
+  tag ANDROID_RELA: нет
+  tag VERNEED: нет
+  tag VERSYM: нет
+note: description data: 13 00 00 00
+версии символов: 0 записей version_r
+импортов: 94, не найдено: 0
+== install/files/hijacks/lib/sms_webhook.so
+NEEDED: [libdl.so] [libc.so] 
+  tag HASH: есть
+  tag GNU_HASH: есть
+  tag TEXTREL: нет
+  tag RUNPATH: нет
+  tag RPATH: нет
+  tag RELR: нет
+  tag ANDROID_REL: нет
+  tag ANDROID_RELA: нет
+  tag VERNEED: нет
+  tag VERSYM: нет
+note: description data: 13 00 00 00
+версии символов: 0 записей version_r
+импортов: 26, не найдено: 0
+== install/files/hijacks/bin/sms_webhook_client
+NEEDED: [libc.so] 
+  tag HASH: есть
+  tag GNU_HASH: есть
+  tag TEXTREL: нет
+  tag RUNPATH: нет
+  tag RPATH: нет
+  tag RELR: нет
+  tag ANDROID_REL: нет
+  tag ANDROID_RELA: нет
+  tag VERNEED: нет
+  tag VERSYM: нет
+note: description data: 13 00 00 00
+версии символов: 0 записей version_r
+импортов: 11, не найдено: 0
+== install/files/hijacks/bin/hijlua
+NEEDED: [librestcore.so] [libmsgapi.so] [liblua.so] [libc.so] 
+  tag HASH: есть
+  tag GNU_HASH: есть
+  tag TEXTREL: нет
+  tag RUNPATH: нет
+  tag RPATH: нет
+  tag RELR: нет
+  tag ANDROID_REL: нет
+  tag ANDROID_RELA: нет
+  tag VERNEED: нет
+  tag VERSYM: нет
+note: description data: 13 00 00 00
+версии символов: 0 записей version_r
+импортов: 16, не найдено: 0
+== пересечение экспорта oled_hijack.so с oled.orig и всеми его библиотеками (ожидаются только хуки)
+capset libc.so
+cl_xmlParseFile libxmlapi.so
+lcd_control_operate libplatform.so
+lcd_refresh_screen libplatform.so
+prctl libc.so
+register_notify_handler libwebsdk.so
+setgid libc.so
+setuid libc.so
+== пересечение экспорта sms_webhook.so с sms и его библиотеками (ожидаются только хуки)
+readlink libc.so
+webserver_register_hookfunction libwebsdk.so

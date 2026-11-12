@@ -1,0 +1,20 @@
+# Адрес 192.168.1.200/24 на USB-сети роутера E5785 (интерфейс wwx001e101f0000).
+# Запускается сам, когда интерфейс появляется (после включения или перезагрузки роутера),
+# и останавливается, когда интерфейс пропадает. Маршрут по умолчанию и DNS не меняет:
+# появляется только маршрут 192.168.1.0/24 на этот интерфейс.
+# Установка: см. README.md установщика, раздел «Адрес компьютера в USB-сети».
+
+[Unit]
+Description=USB-сеть роутера E5785: 192.168.1.200/24 на wwx001e101f0000
+BindsTo=sys-subsystem-net-devices-wwx001e101f0000.device
+After=sys-subsystem-net-devices-wwx001e101f0000.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/ip link set dev wwx001e101f0000 up
+ExecStart=/usr/sbin/ip addr replace 192.168.1.200/24 dev wwx001e101f0000
+ExecStop=-/usr/sbin/ip addr del 192.168.1.200/24 dev wwx001e101f0000
+
+[Install]
+WantedBy=sys-subsystem-net-devices-wwx001e101f0000.device

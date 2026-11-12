@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response>
+<CurrentProfile>1</CurrentProfile>
+<Profiles>
+<Profile><Index>1</Index><IsValid>1</IsValid><Name>Internet</Name><ApnIsStatic>1</ApnIsStatic><ApnName>internet</ApnName><DialupNum>*99#</DialupNum><Username></Username><Password></Password><AuthMode>0</AuthMode><IpIsStatic></IpIsStatic><IpAddress></IpAddress><DnsIsStatic></DnsIsStatic><PrimaryDns></PrimaryDns><SecondaryDns></SecondaryDns><ReadOnly>2</ReadOnly><iptype>2</iptype></Profile>
+<Profile><Index>2</Index><IsValid>1</IsValid><Name>MMS</Name><ApnIsStatic>1</ApnIsStatic><ApnName>mms</ApnName><DialupNum>*99#</DialupNum><Username></Username><Password></Password><AuthMode>0</AuthMode><IpIsStatic></IpIsStatic><IpAddress></IpAddress><DnsIsStatic></DnsIsStatic><PrimaryDns></PrimaryDns><SecondaryDns></SecondaryDns><ReadOnly>0</ReadOnly><iptype>0</iptype></Profile>
+</Profiles>
+</response>

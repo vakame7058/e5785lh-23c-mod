@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response><logs><log><id>dmesg</id><title>Ядро</title></log><log><id>helper</id><title>Служба мода</title></log><log><id>scripts</id><title>Скрипты</title></log></logs></response>

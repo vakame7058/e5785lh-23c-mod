@@ -1,0 +1,457 @@
+diff -ruN '--exclude=*.o' '--exclude=*.ko' '--exclude=.*.cmd' '--exclude=*.mod.c' '--exclude=.tmp_versions' '--exclude=modules.order' '--exclude=Module.symvers' '--exclude=chacha20-arm.S' '--exclude=poly1305-arm.S' a/compat/compat-asm.h b/compat/compat-asm.h
+--- a/compat/compat-asm.h	2026-09-06 13:16:03.000000000 +0300
++++ b/compat/compat-asm.h	2026-10-30 08:48:04.000000000 +0200
+@@ -42,11 +42,13 @@
+ 
+ #if defined(__LINUX_ARM_ARCH__) && LINUX_VERSION_CODE < KERNEL_VERSION(3, 15, 0)
+ #include <asm/assembler.h>
++#ifndef lspush
+ #define lspush push
+ #define lspull pull
+ #undef push
+ #undef pull
+ #endif
++#endif
+ 
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 76) && !defined(ISRHEL8) && !defined(SYM_FUNC_START)
+ #define SYM_FUNC_START ENTRY
+diff -ruN '--exclude=*.o' '--exclude=*.ko' '--exclude=.*.cmd' '--exclude=*.mod.c' '--exclude=.tmp_versions' '--exclude=modules.order' '--exclude=Module.symvers' '--exclude=chacha20-arm.S' '--exclude=poly1305-arm.S' a/compat/compat.h b/compat/compat.h
+--- a/compat/compat.h	2026-09-06 13:16:03.000000000 +0300
++++ b/compat/compat.h	2026-10-30 08:50:16.000000000 +0200
+@@ -768,7 +768,7 @@
+ }
+ #endif
+ 
+-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 17, 0)
++#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 17, 0) && !defined(COMPAT_HAS_READ_CPUID_PART)
+ #define read_cpuid_part() read_cpuid_part_number()
+ #endif
+ 
+@@ -1270,6 +1270,56 @@
+ #define dev_get_tstats64 ip_tunnel_get_stats64
+ #endif
+ 
++#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 12, 0) && !IS_ENABLED(CONFIG_NET_IP_TUNNEL)
++/* ip_tunnel_get_stats64() lives in net/ipv4/ip_tunnel.c, which is not built
++ * when CONFIG_NET_IP_TUNNEL is off; carry a private copy of the 3.10 version
++ * instead of depending on an extra ip_tunnel module. */
++#include <linux/netdevice.h>
++#include <linux/u64_stats_sync.h>
++#include <linux/if_tunnel.h>
++static inline struct rtnl_link_stats64 *__compat_ip_tunnel_get_stats64(struct net_device *dev,
++								       struct rtnl_link_stats64 *tot)
++{
++	int i;
++
++	for_each_possible_cpu(i) {
++		const struct pcpu_tstats *tstats = per_cpu_ptr(dev->tstats, i);
++		u64 rx_packets, rx_bytes, tx_packets, tx_bytes;
++		unsigned int start;
++
++		do {
++			start = u64_stats_fetch_begin_bh(&tstats->syncp);
++			rx_packets = tstats->rx_packets;
++			tx_packets = tstats->tx_packets;
++			rx_bytes = tstats->rx_bytes;
++			tx_bytes = tstats->tx_bytes;
++		} while (u64_stats_fetch_retry_bh(&tstats->syncp, start));
++
++		tot->rx_packets += rx_packets;
++		tot->tx_packets += tx_packets;
++		tot->rx_bytes   += rx_bytes;
++		tot->tx_bytes   += tx_bytes;
++	}
++
++	tot->multicast = dev->stats.multicast;
++	tot->rx_crc_errors = dev->stats.rx_crc_errors;
++	tot->rx_fifo_errors = dev->stats.rx_fifo_errors;
++	tot->rx_length_errors = dev->stats.rx_length_errors;
++	tot->rx_frame_errors = dev->stats.rx_frame_errors;
++	tot->rx_errors = dev->stats.rx_errors;
++	tot->tx_fifo_errors = dev->stats.tx_fifo_errors;
++	tot->tx_carrier_errors = dev->stats.tx_carrier_errors;
++	tot->tx_dropped = dev->stats.tx_dropped;
++	tot->tx_aborted_errors = dev->stats.tx_aborted_errors;
++	tot->tx_errors = dev->stats.tx_errors;
++	tot->collisions  = dev->stats.collisions;
++
++	return tot;
++}
++#undef dev_get_tstats64
++#define dev_get_tstats64 __compat_ip_tunnel_get_stats64
++#endif
++
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0) || defined(ISRHEL9)
+ #define COMPAT_NETDEV_HAS_LLTX_PARAM
+ #endif
+@@ -1415,6 +1465,31 @@
+ }
+ #endif
+ 
++#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0) && !defined(fallthrough)
++#define fallthrough do {} while (0)  /* fallthrough */
++#endif
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 3, 0)
++#include <linux/string.h>
++#include <linux/errno.h>
++/* minimal strscpy() for kernels before 4.3 */
++static inline ssize_t __compat_strscpy(char *dest, const char *src, size_t count)
++{
++	size_t len;
++	if (count == 0)
++		return -E2BIG;
++	len = strnlen(src, count);
++	if (len >= count) {
++		memcpy(dest, src, count - 1);
++		dest[count - 1] = '\0';
++		return -E2BIG;
++	}
++	memcpy(dest, src, len + 1);
++	return len;
++}
++#define strscpy __compat_strscpy
++#endif
++
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 16, 0)
+ #include <crypto/chacha.h>
+ #define CHACHA_KEY_WORDS	8
+diff -ruN '--exclude=*.o' '--exclude=*.ko' '--exclude=.*.cmd' '--exclude=*.mod.c' '--exclude=.tmp_versions' '--exclude=modules.order' '--exclude=Module.symvers' '--exclude=chacha20-arm.S' '--exclude=poly1305-arm.S' a/compat/crypto/chacha/include/crypto/chacha.h b/compat/crypto/chacha/include/crypto/chacha.h
+--- a/compat/crypto/chacha/include/crypto/chacha.h	1970-01-01 03:00:00.000000000 +0300
++++ b/compat/crypto/chacha/include/crypto/chacha.h	2026-10-30 08:57:59.000000000 +0200
+@@ -0,0 +1,45 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Compat <crypto/chacha.h> for kernels without lib/crypto chacha (< 4.20).
++ * Provides chacha_init() and chacha20_crypt() with the same semantics as
++ * the 5.x kernel API, backed by the zinc chacha20 implementation that the
++ * module already builds for old kernels.
++ */
++#ifndef _COMPAT_CRYPTO_CHACHA_H
++#define _COMPAT_CRYPTO_CHACHA_H
++
++#include <zinc/chacha20.h>
++
++#define CHACHA_IV_SIZE		16
++#define CHACHA_KEY_SIZE		32
++#define CHACHA_BLOCK_SIZE	64
++#define CHACHA_STATE_WORDS	(CHACHA_BLOCK_SIZE / sizeof(u32))
++
++static inline void chacha_init(u32 *state, const u32 *key, const u8 *iv)
++{
++	state[0]  = CHACHA20_CONSTANT_EXPA;
++	state[1]  = CHACHA20_CONSTANT_ND_3;
++	state[2]  = CHACHA20_CONSTANT_2_BY;
++	state[3]  = CHACHA20_CONSTANT_TE_K;
++	state[4]  = key[0];
++	state[5]  = key[1];
++	state[6]  = key[2];
++	state[7]  = key[3];
++	state[8]  = key[4];
++	state[9]  = key[5];
++	state[10] = key[6];
++	state[11] = key[7];
++	state[12] = get_unaligned_le32(iv +  0);
++	state[13] = get_unaligned_le32(iv +  4);
++	state[14] = get_unaligned_le32(iv +  8);
++	state[15] = get_unaligned_le32(iv + 12);
++}
++
++static inline void chacha20_crypt(u32 *state, u8 *dst, const u8 *src,
++				  unsigned int bytes)
++{
++	/* Used for short header protection, also with BH disabled: scalar only. */
++	chacha20((struct chacha20_ctx *)state, dst, src, bytes, DONT_USE_SIMD);
++}
++
++#endif /* _COMPAT_CRYPTO_CHACHA_H */
+diff -ruN '--exclude=*.o' '--exclude=*.ko' '--exclude=.*.cmd' '--exclude=*.mod.c' '--exclude=.tmp_versions' '--exclude=modules.order' '--exclude=Module.symvers' '--exclude=chacha20-arm.S' '--exclude=poly1305-arm.S' a/compat/Kbuild.include b/compat/Kbuild.include
+--- a/compat/Kbuild.include	2026-09-06 13:16:03.000000000 +0300
++++ b/compat/Kbuild.include	2026-10-30 08:47:14.000000000 +0200
+@@ -112,6 +112,10 @@
+ ccflags-y += -I$(kbuild-dir)/compat/crypto/blake2s/include
+ endif
+ 
++ifeq ($(wildcard $(srctree)/include/crypto/chacha.h),)
++ccflags-y += -I$(kbuild-dir)/compat/crypto/chacha/include
++endif
++
+ ifeq ($(wildcard $(srctree)/include/crypto/chacha20poly1305.h),)
+ ccflags-y += -I$(kbuild-dir)/compat/crypto/chacha20poly1305/include
+ endif
+@@ -135,3 +139,7 @@
+ ifeq ($(wildcard $(srctree)/include/linux/sprintf.h),)
+ ccflags-y += -I$(kbuild-dir)/compat/sprintf/include
+ endif
++
++ifneq ($(shell grep -s -F "read_cpuid_part(void)" "$(srctree)/arch/arm/include/asm/cputype.h"),)
++ccflags-y += -DCOMPAT_HAS_READ_CPUID_PART
++endif
+diff -ruN '--exclude=*.o' '--exclude=*.ko' '--exclude=.*.cmd' '--exclude=*.mod.c' '--exclude=.tmp_versions' '--exclude=modules.order' '--exclude=Module.symvers' '--exclude=chacha20-arm.S' '--exclude=poly1305-arm.S' a/compat/neon-arm/kmode_neon.c b/compat/neon-arm/kmode_neon.c
+--- a/compat/neon-arm/kmode_neon.c	1970-01-01 03:00:00.000000000 +0300
++++ b/compat/neon-arm/kmode_neon.c	2026-10-30 08:58:03.244687560 +0200
+@@ -0,0 +1,88 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Private kernel-mode NEON for kernels built without CONFIG_KERNEL_MODE_NEON.
++ * Same logic as kernel_neon_begin()/kernel_neon_end() of arch/arm/vfp/vfpmodule.c
++ * in this very kernel tree, using vfp_current_hw_state and vfp_save_state found
++ * through kallsyms_lookup_name(). Uniprocessor only.
++ *
++ * The in_interrupt() BUG_ON of the original is not kept: may_use_simd() below
++ * refuses hard and soft irq context, and nothing else in this kernel touches
++ * NEON from BH-disabled sections.
++ */
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/kallsyms.h>
++#include <linux/preempt.h>
++#include <linux/sched.h>
++#include <linux/smp.h>
++#include <asm/thread_info.h>
++#include <asm/vfp.h>
++
++#ifdef CONFIG_SMP
++#error "kmode_neon.c supports uniprocessor kernels only"
++#endif
++
++#define awg_fmrx(_vfp_) ({ u32 __v; \
++	asm("mrc p10, 7, %0, " #_vfp_ ", cr0, 0" : "=r" (__v) : : "cc"); __v; })
++#define awg_fmxr(_vfp_, _var_) \
++	asm("mcr p10, 7, %0, " #_vfp_ ", cr0, 0" : : "r" (_var_) : "cc")
++
++static bool neon = true;
++module_param(neon, bool, 0444);
++MODULE_PARM_DESC(neon, "Use kernel-mode NEON for crypto (default: on)");
++
++bool awg_kmode_neon_enabled __read_mostly;
++
++static union vfp_state **awg_vfp_hw_state __read_mostly;
++static void (*awg_vfp_save_state)(void *location, u32 fpexc) __read_mostly;
++
++void kernel_neon_begin(void)
++{
++	struct thread_info *thread = current_thread_info();
++	union vfp_state **hw;
++	unsigned int cpu;
++	u32 fpexc;
++
++	cpu = get_cpu();
++	hw = &awg_vfp_hw_state[cpu];
++
++	fpexc = awg_fmrx(cr8) | FPEXC_EN;
++	awg_fmxr(cr8, fpexc);
++
++	/* Save the userland NEON/VFP state; under UP the owner may be another task. */
++	if (*hw == &thread->vfpstate)
++		awg_vfp_save_state(&thread->vfpstate, fpexc);
++	else if (*hw != NULL)
++		awg_vfp_save_state(*hw, fpexc);
++	*hw = NULL;
++}
++
++void kernel_neon_end(void)
++{
++	awg_fmxr(cr8, awg_fmrx(cr8) & ~FPEXC_EN);
++	put_cpu();
++}
++
++void __init awg_kmode_neon_init(void)
++{
++	unsigned long hw, save;
++
++	if (!neon) {
++		pr_info("kernel-mode NEON: off (neon=0)\n");
++		return;
++	}
++	if (!(elf_hwcap & HWCAP_NEON)) {
++		pr_info("kernel-mode NEON: off (no NEON in hwcap)\n");
++		return;
++	}
++	hw = kallsyms_lookup_name("vfp_current_hw_state");
++	save = kallsyms_lookup_name("vfp_save_state");
++	if (!hw || !save) {
++		pr_warn("kernel-mode NEON: off (vfp symbols not found)\n");
++		return;
++	}
++	awg_vfp_hw_state = (union vfp_state **)hw;
++	awg_vfp_save_state = (void (*)(void *, u32))save;
++	awg_kmode_neon_enabled = true;
++	pr_info("kernel-mode NEON: on\n");
++}
+diff -ruN '--exclude=*.o' '--exclude=*.ko' '--exclude=.*.cmd' '--exclude=*.mod.c' '--exclude=.tmp_versions' '--exclude=modules.order' '--exclude=Module.symvers' '--exclude=chacha20-arm.S' '--exclude=poly1305-arm.S' a/compat/simd-asm/include/asm/simd.h b/compat/simd-asm/include/asm/simd.h
+--- a/compat/simd-asm/include/asm/simd.h	2026-09-06 13:16:03.000000000 +0300
++++ b/compat/simd-asm/include/asm/simd.h	2026-10-30 08:58:03.252955832 +0200
+@@ -5,12 +5,18 @@
+ #include <asm/fpu/api.h>
+ #endif
+ 
++#ifdef AWG_PRIVATE_KMODE_NEON
++extern bool awg_kmode_neon_enabled;
++#endif
++
+ static __must_check inline bool may_use_simd(void)
+ {
+ #if defined(CONFIG_X86_64)
+ 	return irq_fpu_usable();
+ #elif defined(CONFIG_ARM64) && defined(CONFIG_KERNEL_MODE_NEON)
+ 	return true;
++#elif defined(CONFIG_ARM) && defined(AWG_PRIVATE_KMODE_NEON)
++	return awg_kmode_neon_enabled && !in_nmi() && !in_irq() && !in_serving_softirq();
+ #elif defined(CONFIG_ARM) && defined(CONFIG_KERNEL_MODE_NEON)
+ 	return !in_nmi() && !in_irq() && !in_serving_softirq();
+ #else
+diff -ruN '--exclude=*.o' '--exclude=*.ko' '--exclude=.*.cmd' '--exclude=*.mod.c' '--exclude=.tmp_versions' '--exclude=modules.order' '--exclude=Module.symvers' '--exclude=chacha20-arm.S' '--exclude=poly1305-arm.S' a/compat/udp_tunnel/udp_tunnel.c b/compat/udp_tunnel/udp_tunnel.c
+--- a/compat/udp_tunnel/udp_tunnel.c	2026-09-06 13:16:03.000000000 +0300
++++ b/compat/udp_tunnel/udp_tunnel.c	2026-10-30 08:48:25.000000000 +0200
+@@ -9,6 +9,11 @@
+ #include <net/udp.h>
+ #include <net/udp_tunnel.h>
+ 
++/* compat.h maps the 7.1.5+ sk-based API onto the socket-based one; the
++ * definitions below are the socket-based implementation itself. */
++#undef setup_udp_tunnel_sock
++#undef udp_tunnel_sock_release
++
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(3, 12, 0)
+ #define __sk_user_data(sk) ((*((void __rcu **)&(sk)->sk_user_data)))
+ #define rcu_dereference_sk_user_data(sk) rcu_dereference(__sk_user_data((sk)))
+diff -ruN '--exclude=*.o' '--exclude=*.ko' '--exclude=.*.cmd' '--exclude=*.mod.c' '--exclude=.tmp_versions' '--exclude=modules.order' '--exclude=Module.symvers' '--exclude=chacha20-arm.S' '--exclude=poly1305-arm.S' a/crypto/zinc/selftest/blake2s.c b/crypto/zinc/selftest/blake2s.c
+--- a/crypto/zinc/selftest/blake2s.c	2026-09-06 13:16:03.000000000 +0300
++++ b/crypto/zinc/selftest/blake2s.c	2026-10-30 08:59:09.726686792 +0200
+@@ -2072,7 +2072,7 @@
+ 		buf[i] = (u8)i;
+ 
+ 	for (i = 0; i < ARRAY_SIZE(blake2s_keyed_testvecs); ++i) {
+-		blake2s(hash, buf, key, BLAKE2S_HASH_SIZE, i, BLAKE2S_KEY_SIZE);
++		(blake2s)(hash, buf, key, BLAKE2S_HASH_SIZE, i, BLAKE2S_KEY_SIZE);
+ 		if (memcmp(hash, blake2s_keyed_testvecs[i], BLAKE2S_HASH_SIZE)) {
+ 			pr_err("blake2s keyed self-test %zu: FAIL\n", i + 1);
+ 			success = false;
+@@ -2080,7 +2080,7 @@
+ 	}
+ 
+ 	for (i = 0; i < ARRAY_SIZE(blake2s_testvecs); ++i) {
+-		blake2s(hash, buf, NULL, BLAKE2S_HASH_SIZE, i, 0);
++		(blake2s)(hash, buf, NULL, BLAKE2S_HASH_SIZE, i, 0);
+ 		if (memcmp(hash, blake2s_testvecs[i], BLAKE2S_HASH_SIZE)) {
+ 			pr_err("blake2s unkeyed self-test %zu: FAIL\n", i + i);
+ 			success = false;
+diff -ruN '--exclude=*.o' '--exclude=*.ko' '--exclude=.*.cmd' '--exclude=*.mod.c' '--exclude=.tmp_versions' '--exclude=modules.order' '--exclude=Module.symvers' '--exclude=chacha20-arm.S' '--exclude=poly1305-arm.S' a/junk.c b/junk.c
+--- a/junk.c	2026-09-06 13:16:03.000000000 +0300
++++ b/junk.c	2026-10-30 08:49:02.000000000 +0200
+@@ -252,7 +252,7 @@
+     int pkt_size, mods_size;
+     struct jp_tag *tag, *tmp;
+     struct jp_modifier *mod;
+-    char* buf, *desc;
++    char *buf = NULL, *desc;
+     LIST_HEAD(head);
+ 
+     if (str == NULL)
+diff -ruN '--exclude=*.o' '--exclude=*.ko' '--exclude=.*.cmd' '--exclude=*.mod.c' '--exclude=.tmp_versions' '--exclude=modules.order' '--exclude=Module.symvers' '--exclude=chacha20-arm.S' '--exclude=poly1305-arm.S' a/Kbuild b/Kbuild
+--- a/Kbuild	2026-09-06 13:16:03.000000000 +0300
++++ b/Kbuild	2026-10-30 08:59:09.726448078 +0200
+@@ -8,6 +8,12 @@
+ ccflags-$(if $(WIREGUARD_VERSION),y,) += -D'WIREGUARD_VERSION="$(WIREGUARD_VERSION)"'
+ ccflags-$(if $(OMIT_ENDPOINTS),y,) += -D'OMIT_ENDPOINTS="$(OMIT_ENDPOINTS)"'
+ 
++ccflags-y += -DCONFIG_KERNEL_MODE_NEON=1 -DAWG_PRIVATE_KMODE_NEON
++asflags-y += -DCONFIG_KERNEL_MODE_NEON=1
++
++# Linux 3.10 Balong: run zinc init and self-tests at module load
++ccflags-y += -DCOMPAT_INIT_CRYPTO -DCONFIG_ZINC_SELFTEST=1
++
+ amneziawg-y := main.o noise.o device.o peer.o timers.o queueing.o send.o receive.o socket.o peerlookup.o allowedips.o ratelimiter.o cookie.o netlink.o junk.o header_protection.o
+ 
+ ifeq ($(shell [ $(VERSION) -lt 6 -o \( $(VERSION) -eq 6 -a $(PATCHLEVEL) -lt 1 \) ] && echo y),y)
+@@ -20,5 +26,6 @@
+ 	include $(src)/crypto/Kbuild.include
+ endif
+ include $(src)/compat/Kbuild.include
++amneziawg-y += compat/neon-arm/kmode_neon.o
+ 
+ obj-$(if $(KBUILD_EXTMOD),m,$(CONFIG_AMNEZIAWG)) := amneziawg.o
+diff -ruN '--exclude=*.o' '--exclude=*.ko' '--exclude=.*.cmd' '--exclude=*.mod.c' '--exclude=.tmp_versions' '--exclude=modules.order' '--exclude=Module.symvers' '--exclude=chacha20-arm.S' '--exclude=poly1305-arm.S' a/main.c b/main.c
+--- a/main.c	2026-09-06 13:16:03.000000000 +0300
++++ b/main.c	2026-10-30 08:59:24.952731310 +0200
+@@ -11,16 +11,27 @@
+ #include "ratelimiter.h"
+ #include "netlink.h"
+ #include "uapi/wireguard.h"
++#ifdef COMPAT_INIT_CRYPTO
++#include "crypto/zinc.h"
++#endif
+ 
+ #include <linux/init.h>
+ #include <linux/module.h>
+ #include <net/genetlink.h>
+ #include <net/rtnetlink.h>
+ 
++#ifdef AWG_PRIVATE_KMODE_NEON
++void awg_kmode_neon_init(void);
++#endif
++
+ static int __init wg_mod_init(void)
+ {
+ 	int ret;
+ 
++#ifdef AWG_PRIVATE_KMODE_NEON
++	awg_kmode_neon_init();
++#endif
++
+ #ifdef COMPAT_INIT_CRYPTO
+ 	if ((ret = chacha20_mod_init()) || (ret = poly1305_mod_init()) ||
+ 	    (ret = chacha20poly1305_mod_init()) || (ret = blake2s_mod_init()) ||
+diff -ruN '--exclude=*.o' '--exclude=*.ko' '--exclude=.*.cmd' '--exclude=*.mod.c' '--exclude=.tmp_versions' '--exclude=modules.order' '--exclude=Module.symvers' '--exclude=chacha20-arm.S' '--exclude=poly1305-arm.S' a/socket.c b/socket.c
+--- a/socket.c	2026-09-06 13:16:03.000000000 +0300
++++ b/socket.c	2026-10-30 08:46:49.000000000 +0200
+@@ -137,7 +137,12 @@
+ 			if (cache)
+ 				dst_cache_reset(cache);
+ 		}
++#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 12, 0)
++		/* 3.10: ip6_dst_lookup_flow() has no net argument; use the compat ipv6_stub path */
++		dst = ipv6_stub->ipv6_dst_lookup_flow(sock_net(sock), sock, &fl, NULL);
++#else
+ 		dst = ip6_dst_lookup_flow(sock_net(sock), sock, &fl, NULL);
++#endif
+ 		if (IS_ERR(dst)) {
+ 			ret = PTR_ERR(dst);
+ 			net_dbg_ratelimited("%s: No route to %pISpfsc, error %d\n",
+--- a/send.c
++++ b/send.c
+@@ -407,9 +407,14 @@
+ 
+ #ifdef COMPAT_CRYPTO_IS_ZINC
+ 		simd_relax(&simd_context);
+-#endif
++		/* On 3.10 cond_resched() ignores preempt_count: never schedule
++		 * with NEON held. simd_relax() or simd_put() will reschedule. */
++		if (need_resched() && !(simd_context & HAVE_SIMD_IN_USE))
++			cond_resched();
++#else
+ 		if (need_resched())
+ 			cond_resched();
++#endif
+ 	}
+ #ifdef COMPAT_CRYPTO_IS_ZINC
+ 	simd_put(&simd_context);
+--- a/receive.c
++++ b/receive.c
+@@ -609,9 +609,14 @@
+ 		wg_queue_enqueue_per_peer_rx(skb, state);
+ #ifdef COMPAT_CRYPTO_IS_ZINC
+ 		simd_relax(&simd_context);
+-#endif
++		/* On 3.10 cond_resched() ignores preempt_count: never schedule
++		 * with NEON held. simd_relax() or simd_put() will reschedule. */
++		if (need_resched() && !(simd_context & HAVE_SIMD_IN_USE))
++			cond_resched();
++#else
+ 		if (need_resched())
+ 			cond_resched();
++#endif
+ 	}
+ 
+ #ifdef COMPAT_CRYPTO_IS_ZINC
